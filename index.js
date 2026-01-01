@@ -11,7 +11,6 @@ const {
 const Pino = require('pino')
 const axios = require('axios')
 const fs = require('fs-extra')
-const path = require('path')
 const { spawn } = require('child_process')
 
 // ================= CONFIG =================
@@ -19,26 +18,26 @@ const BOT_NAME = 'WhatsappBotGro'
 const DOWNLOAD_DIR = './downloads'
 const MODELS = [
   'llama-3.1-8b-instant',
-  'mixtral-8x7b-32768',
-  'llama-3.1-70b-versatile'
+  'mixtral-8x7b-32768'
 ]
+
 fs.ensureDirSync(DOWNLOAD_DIR)
 
 // ================= STATE =================
 const session = new Map()
 const pendingLink = new Map()
-const activeDownloads = new Set()
+const activeDownload = new Set()
 
 // ================= UTILS =================
-const getText = msg =>
-  msg.message?.conversation ||
-  msg.message?.extendedTextMessage?.text ||
-  msg.message?.imageMessage?.caption ||
-  msg.message?.videoMessage?.caption ||
+const getText = m =>
+  m.message?.conversation ||
+  m.message?.extendedTextMessage?.text ||
+  m.message?.imageMessage?.caption ||
+  m.message?.videoMessage?.caption ||
   ''
 
 const detectLang = t =>
-  /(gua|lu|kok|udah|nggak|bang|woy)/i.test(t) ? 'id' : 'en'
+  /(gue|lu|kok|udah|bang|woy)/i.test(t) ? 'id' : 'en'
 
 const TXT = {
   id: {
@@ -49,17 +48,18 @@ const TXT = {
 2️⃣ Downloader (YT / TikTok / IG)
 3️⃣ Tools (coming soon)
 
-Balas angka (1–3).
+Balas angka (1–3)
 Ketik *menu* kapan aja.`,
     ai: '🤖 AI siap. Kirim pesan.\n\nKetik *menu* buat balik.',
-    link: '⬇️ Kirim link videonya.',
-    format:
+    askLink: '⬇️ Kirim link video (YT / Shorts / IG / TikTok).',
+    askFormat:
 `Pilih format:
 1️⃣ Video (MP4)
 2️⃣ Audio (MP3)`,
-    downloading: '⏬ Download dimulai…',
-    busy: '⏳ Masih ada proses berjalan.',
-    fail: '❌ Gagal.'
+    downloading: '⏬ Download dimulai...',
+    done: '✅ Selesai.\n\nKetik *menu* buat kembali.',
+    busy: '⏳ Masih ada proses download.',
+    invalid: '❌ Format tidak valid.'
   },
   en: {
     menu:
@@ -69,17 +69,18 @@ Ketik *menu* kapan aja.`,
 2️⃣ Downloader (YT / TikTok / IG)
 3️⃣ Tools (coming soon)
 
-Reply 1–3.
+Reply 1–3
 Type *menu* anytime.`,
     ai: '🤖 AI ready.',
-    link: '⬇️ Send the video link.',
-    format:
+    askLink: '⬇️ Send the video link.',
+    askFormat:
 `Choose format:
 1️⃣ Video (MP4)
 2️⃣ Audio (MP3)`,
-    downloading: '⏬ Download started…',
-    busy: '⏳ Process running.',
-    fail: '❌ Failed.'
+    downloading: '⏬ Download started...',
+    done: '✅ Done.\n\nType *menu* to return.',
+    busy: '⏳ Download in progress.',
+    invalid: '❌ Invalid format.'
   }
 }
 
@@ -134,37 +135,36 @@ async function start() {
     if (isGroup) {
       const mentioned =
         msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
-      const repliedBot =
+      const replied =
         msg.message?.extendedTextMessage?.contextInfo?.participant === sock.user.id
 
       if (
         !mentioned.includes(sock.user.id) &&
-        !repliedBot &&
+        !replied &&
         !/^menu|^[123]$/.test(lower)
       ) return
     }
 
-    // ===== SESSION KEY =====
-    const sessionKey = isGroup ? `${chatId}:${sender}` : sender
+    const key = isGroup ? `${chatId}:${sender}` : sender
 
-    if (!session.has(sessionKey)) {
+    if (!session.has(key)) {
       const lang = detectLang(text)
-      session.set(sessionKey, { lang, mode: null })
+      session.set(key, { lang, mode: null })
       await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    const s = session.get(sessionKey)
+    const s = session.get(key)
     const lang = s.lang
 
     if (lower === 'menu') {
       s.mode = null
-      pendingLink.delete(sessionKey)
+      pendingLink.delete(key)
       await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    // ===== MAIN MENU =====
+    // ===== MENU =====
     if (!s.mode) {
       if (lower === '1') {
         s.mode = 'AI'
@@ -173,7 +173,7 @@ async function start() {
       }
       if (lower === '2') {
         s.mode = 'DL'
-        await sock.sendMessage(chatId, { text: TXT[lang].link })
+        await sock.sendMessage(chatId, { text: TXT[lang].askLink })
         return
       }
       await sock.sendMessage(chatId, { text: TXT[lang].menu })
@@ -182,34 +182,35 @@ async function start() {
 
     // ===== AI =====
     if (s.mode === 'AI') {
-      const reply = await aiReply(text)
-      await sock.sendMessage(chatId, {
-        text: reply + '\n\n—\nType *menu*'
-      })
+      const r = await aiReply(text)
+      await sock.sendMessage(chatId, { text: r + '\n\n—\nmenu' })
       return
     }
 
-    // ===== DL =====
-    if (s.mode === 'DL' && !pendingLink.has(sessionKey)) {
-      if (/https?:\/\//i.test(text)) {
-        pendingLink.set(sessionKey, text)
-        await sock.sendMessage(chatId, { text: TXT[lang].format })
+    // ===== DL STEP 1 (LINK) =====
+    if (s.mode === 'DL' && /https?:\/\//i.test(text)) {
+      pendingLink.set(key, text)
+      await sock.sendMessage(chatId, { text: TXT[lang].askFormat })
+      return
+    }
+
+    // ===== DL STEP 2 (FORMAT) =====
+    if (s.mode === 'DL' && pendingLink.has(key)) {
+      if (!['1', '2'].includes(lower)) {
+        await sock.sendMessage(chatId, { text: TXT[lang].invalid })
+        return
       }
-      return
-    }
 
-    if (s.mode === 'DL' && pendingLink.has(sessionKey)) {
-      if (!['1', '2'].includes(lower)) return
-      if (activeDownloads.has(sessionKey)) {
+      if (activeDownload.has(key)) {
         await sock.sendMessage(chatId, { text: TXT[lang].busy })
         return
       }
 
-      activeDownloads.add(sessionKey)
+      activeDownload.add(key)
       await sock.sendMessage(chatId, { text: TXT[lang].downloading })
 
-      const url = pendingLink.get(sessionKey)
-      pendingLink.delete(sessionKey)
+      const url = pendingLink.get(key)
+      pendingLink.delete(key)
 
       const out = `${DOWNLOAD_DIR}/${Date.now()}.%(ext)s`
       const args =
@@ -218,9 +219,9 @@ async function start() {
           : ['-f', 'mp4', '-o', out, url]
 
       spawn('yt-dlp', args).on('close', async () => {
-        activeDownloads.delete(sessionKey)
+        activeDownload.delete(key)
         s.mode = null
-        await sock.sendMessage(chatId, { text: TXT[lang].menu })
+        await sock.sendMessage(chatId, { text: TXT[lang].done })
       })
     }
   })
