@@ -14,13 +14,12 @@ const { spawn } = require('child_process')
 const fs = require('fs-extra')
 
 const BOT_NAME = 'WhatsappBotGro'
-const DOWNLOAD_DIR = './downloads'
-fs.ensureDirSync(DOWNLOAD_DIR)
+const BOT_KEYWORDS = ['bot', 'ai', 'menu']
 
 const session = new Map()
 const activeDownload = new Set()
 
-// ================= UTILS =================
+// ============ UTILS ============
 const getText = m =>
   m.message?.conversation ||
   m.message?.extendedTextMessage?.text ||
@@ -38,16 +37,15 @@ const TXT = {
 
 1️⃣ AI Chat
 2️⃣ Downloader
-3️⃣ Tools (soon)
 
 Balas:
 - 1 / ai
 - 2 / download
 - menu`,
-    ai: '🤖 AI siap. Kirim pesan apa aja.\n\nKetik *menu* untuk kembali.',
+    ai: '🤖 AI aktif. Kirim pesan.\n\nKetik *menu* untuk kembali.',
     askLink: '⬇️ Kirim link video (YT / IG / TikTok).',
     downloading: '⏬ Download dimulai...',
-    done: '✅ Selesai.\n\nKetik *menu* untuk kembali.'
+    done: '✅ Selesai.\n\nKetik *menu*'
   },
   en: {
     menu:
@@ -55,7 +53,6 @@ Balas:
 
 1️⃣ AI Chat
 2️⃣ Downloader
-3️⃣ Tools (soon)
 
 Reply:
 - 1 / ai
@@ -64,11 +61,11 @@ Reply:
     ai: '🤖 AI ready.\n\nType *menu* to return.',
     askLink: '⬇️ Send video link.',
     downloading: '⏬ Downloading...',
-    done: '✅ Done.\n\nType *menu* to return.'
+    done: '✅ Done.\n\nType *menu*'
   }
 }
 
-// ================= AI =================
+// ============ AI ============
 async function aiReply(text) {
   const r = await axios.post(
     'https://api.groq.com/openai/v1/chat/completions',
@@ -85,7 +82,7 @@ async function aiReply(text) {
   return r.data.choices[0].message.content
 }
 
-// ================= BOT =================
+// ============ BOT ============
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./session')
   const { version } = await fetchLatestBaileysVersion()
@@ -115,16 +112,24 @@ async function start() {
     const isGroup = chatId.endsWith('@g.us')
     const sender = jidNormalizedUser(msg.key.participant || chatId)
     const text = getText(msg).trim()
+    if (!text) return
+
     const lower = text.toLowerCase()
     const key = isGroup ? `${chatId}:${sender}` : sender
 
-    // GROUP FILTER
-    if (isGroup && !session.has(key)) {
+    // ===== GROUP FILTER =====
+    if (isGroup) {
       const mentioned =
-        msg.message.extendedTextMessage?.contextInfo?.mentionedJid || []
-      if (!mentioned.includes(sock.user.id)) return
+        msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
+
+      const called =
+        mentioned.includes(sock.user.id) ||
+        BOT_KEYWORDS.some(k => lower.startsWith(k))
+
+      if (!called) return
     }
 
+    // ===== SESSION INIT =====
     if (!session.has(key)) {
       const lang = detectLang(text)
       session.set(key, { lang, mode: null })
