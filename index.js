@@ -38,73 +38,51 @@ const getText = m =>
 const detectLang = t =>
   /(gue|lu|kok|udah|bang|woy)/i.test(t) ? 'id' : 'en'
 
-// ================= TEXT =================
-const TXT = {
-  id: {
-    hi: `👋 Halo, gue ${BOT_NAME}`,
-    ai: '🤖 AI siap. Kirim pesan apa aja.',
-    askLink: '⬇️ Kirim link video (YT / IG / TikTok).',
-    downloading: '⏬ Download dimulai...',
-    done: '✅ Selesai.',
-    busy: '⏳ Masih ada proses.',
-    invalid: '❌ Pilihan tidak valid.'
-  },
-  en: {
-    hi: `👋 Hi, I'm ${BOT_NAME}`,
-    ai: '🤖 AI ready.',
-    askLink: '⬇️ Send the video link.',
-    downloading: '⏬ Download started...',
-    done: '✅ Done.',
-    busy: '⏳ Process running.',
-    invalid: '❌ Invalid choice.'
-  }
-}
-
-// ================= LIST BUILDER =================
+// ================= LIST BUILDERS =================
 const mainMenu = lang => ({
-  text: TXT[lang].hi,
-  footer: 'Select a menu',
+  text: lang === 'id'
+    ? `👋 Halo, gue ${BOT_NAME}`
+    : `👋 Hi, I'm ${BOT_NAME}`,
+  footer: BOT_NAME,
   title: '📋 Main Menu',
   buttonText: 'Open Menu',
-  sections: [
-    {
-      title: 'Features',
-      rows: [
-        { title: '🤖 AI Chat', rowId: 'MENU_AI' },
-        { title: '⬇️ Downloader', rowId: 'MENU_DL' },
-        { title: '🧰 Tools', rowId: 'MENU_TOOLS' }
-      ]
-    }
-  ]
-})
-
-const formatMenu = lang => ({
-  text: 'Pilih format',
-  footer: 'Downloader',
-  title: '🎞 Download Format',
-  buttonText: 'Choose',
-  sections: [
-    {
-      title: 'Format',
-      rows: [
-        { title: '🎥 Video (MP4)', rowId: 'DL_VIDEO' },
-        { title: '🎵 Audio (MP3)', rowId: 'DL_AUDIO' }
-      ]
-    }
-  ]
+  sections: [{
+    title: 'Features',
+    rows: [
+      { title: '🤖 AI Chat', rowId: 'MENU_AI' },
+      { title: '⬇️ Downloader', rowId: 'MENU_DL' },
+      { title: '🧰 Tools', rowId: 'MENU_TOOLS' }
+    ]
+  }]
 })
 
 const backMenu = lang => ({
-  text: 'Kembali ke menu utama',
+  text: lang === 'id'
+    ? 'Kembali ke menu utama'
+    : 'Back to main menu',
   footer: BOT_NAME,
   title: '⬅️ Back',
   buttonText: 'Menu',
-  sections: [
-    {
-      title: 'Navigation',
-      rows: [{ title: '📋 Main Menu', rowId: 'MENU_HOME' }]
-    }
-  ]
+  sections: [{
+    title: 'Navigation',
+    rows: [{ title: '📋 Main Menu', rowId: 'MENU_HOME' }]
+  }]
+})
+
+const formatMenu = lang => ({
+  text: lang === 'id'
+    ? 'Pilih format download'
+    : 'Choose download format',
+  footer: BOT_NAME,
+  title: '🎞 Format',
+  buttonText: 'Choose',
+  sections: [{
+    title: 'Format',
+    rows: [
+      { title: '🎥 Video (MP4)', rowId: 'DL_VIDEO' },
+      { title: '🎵 Audio (MP3)', rowId: 'DL_AUDIO' }
+    ]
+  }]
 })
 
 // ================= AI =================
@@ -154,14 +132,14 @@ async function start() {
     const text = getText(msg)
     const key = isGroup ? `${chatId}:${sender}` : sender
 
-    // ===== GROUP ENTRY FILTER =====
+    // GROUP ENTRY FILTER
     if (isGroup && !session.has(key)) {
       const mentioned =
         msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
       if (!mentioned.includes(sock.user.id)) return
     }
 
-    // ===== INIT =====
+    // INIT
     if (!session.has(key)) {
       const lang = detectLang(text)
       session.set(key, { lang, mode: null })
@@ -172,7 +150,7 @@ async function start() {
     const s = session.get(key)
     const lang = s.lang
 
-    // ===== MENU HANDLER =====
+    // MENU HOME
     if (text === 'MENU_HOME') {
       s.mode = null
       pendingLink.delete(key)
@@ -180,56 +158,44 @@ async function start() {
       return
     }
 
+    // AI
     if (text === 'MENU_AI') {
       s.mode = 'AI'
-      await sock.sendMessage(chatId, {
-        text: TXT[lang].ai,
-        listMessage: backMenu(lang)
-      })
+      await sock.sendMessage(chatId, { listMessage: backMenu(lang) })
       return
     }
 
-    if (text === 'MENU_DL') {
-      s.mode = 'DL'
-      await sock.sendMessage(chatId, {
-        text: TXT[lang].askLink,
-        listMessage: backMenu(lang)
-      })
-      return
-    }
-
-    // ===== AI =====
     if (s.mode === 'AI') {
       const r = await aiReply(text)
-      await sock.sendMessage(chatId, {
-        text: r,
-        listMessage: backMenu(lang)
-      })
+      await sock.sendMessage(chatId, { text: r })
+      await sock.sendMessage(chatId, { listMessage: backMenu(lang) })
       return
     }
 
-    // ===== DL LINK =====
+    // DL
+    if (text === 'MENU_DL') {
+      s.mode = 'DL'
+      await sock.sendMessage(chatId, { text: lang === 'id'
+        ? '⬇️ Kirim link video'
+        : '⬇️ Send video link' })
+      await sock.sendMessage(chatId, { listMessage: backMenu(lang) })
+      return
+    }
+
     if (s.mode === 'DL' && /https?:\/\//i.test(text)) {
       pendingLink.set(key, text)
       await sock.sendMessage(chatId, { listMessage: formatMenu(lang) })
       return
     }
 
-    // ===== DL FORMAT =====
     if (s.mode === 'DL' && pendingLink.has(key)) {
-      if (activeDownload.has(key)) {
-        await sock.sendMessage(chatId, { text: TXT[lang].busy })
-        return
-      }
-
       const isAudio = text === 'DL_AUDIO'
-      if (!['DL_AUDIO', 'DL_VIDEO'].includes(text)) {
-        await sock.sendMessage(chatId, { text: TXT[lang].invalid })
-        return
-      }
+      if (!['DL_AUDIO', 'DL_VIDEO'].includes(text)) return
 
+      if (activeDownload.has(key)) return
       activeDownload.add(key)
-      await sock.sendMessage(chatId, { text: TXT[lang].downloading })
+
+      await sock.sendMessage(chatId, { text: '⏬ Downloading...' })
 
       const url = pendingLink.get(key)
       pendingLink.delete(key)
@@ -242,10 +208,8 @@ async function start() {
       spawn('yt-dlp', args).on('close', async () => {
         activeDownload.delete(key)
         s.mode = null
-        await sock.sendMessage(chatId, {
-          text: TXT[lang].done,
-          listMessage: mainMenu(lang)
-        })
+        await sock.sendMessage(chatId, { text: '✅ Done' })
+        await sock.sendMessage(chatId, { listMessage: mainMenu(lang) })
       })
     }
   })
