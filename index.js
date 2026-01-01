@@ -1,7 +1,9 @@
 /**
- * WhatsApp Bot – Pairing Code + Downloader
+ * WhatsApp Bot – Groq AI (FREE)
  * Termux / VPS / Laptop SAFE
  */
+
+require('dotenv').config()
 
 const {
   default: makeWASocket,
@@ -12,44 +14,29 @@ const {
 
 const Pino = require('pino')
 const axios = require('axios')
-const fs = require('fs-extra')
 const readline = require('readline')
-const { exec } = require('child_process')
-const path = require('path')
-require('dotenv').config()
+
 const PREFIX = '!'
 const BOT_NAME = 'WA-BOT'
-const DOWNLOAD_DIR = './downloads'
 
-// ================= UTIL =================
-fs.ensureDirSync(DOWNLOAD_DIR)
-
+// =============== INPUT =================
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
 })
-
 const ask = q => new Promise(r => rl.question(q, r))
 
-const sleep = ms => new Promise(r => setTimeout(r, ms))
-
-const getText = msg =>
-  msg.message?.conversation ||
-  msg.message?.extendedTextMessage?.text ||
-  ''
-
-const isUrl = text => /(https?:\/\/[^\s]+)/i.test(text)
-
-// ================= AI =================
+// =============== AI (GROQ) =================
 async function aiReply(prompt) {
-  const apiKey = process.env.AI_API_KEY
+  const apiKey = process.env.GROQ_API_KEY
   if (!apiKey) return 'AI belum dikonfigurasi.'
 
   const res = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
+    'https://api.groq.com/openai/v1/chat/completions',
     {
-      model: 'gpt-3.5-turbo',
-      messages: [{ role: 'user', content: prompt }]
+      model: 'llama3-8b-8192',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7
     },
     {
       headers: {
@@ -62,26 +49,7 @@ async function aiReply(prompt) {
   return res.data.choices[0].message.content
 }
 
-// ================= DOWNLOADER =================
-function runYtDlp(url, audio = false) {
-  return new Promise((resolve, reject) => {
-    const output = path.join(
-      DOWNLOAD_DIR,
-      `${Date.now()}.%(ext)s`
-    )
-
-    const cmd = audio
-      ? `yt-dlp -x --audio-format mp3 -o "${output}" "${url}"`
-      : `yt-dlp -f mp4 -o "${output}" "${url}"`
-
-    exec(cmd, (err, stdout, stderr) => {
-      if (err) return reject(stderr)
-      resolve(fs.readdirSync(DOWNLOAD_DIR).pop())
-    })
-  })
-}
-
-// ================= BOT =================
+// =============== BOT =================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./session')
   const { version } = await fetchLatestBaileysVersion()
@@ -118,95 +86,70 @@ async function startBot() {
     }
   })
 
-  // MESSAGE
+  // MESSAGE HANDLER
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0]
     if (!msg.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
-    const text = getText(msg).trim()
+    const text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      ''
+
     if (!text) return
 
     await sock.sendPresenceUpdate('composing', chatId)
 
-    // AUTO LINK DOWNLOAD
-    if (isUrl(text)) {
-      await sock.sendMessage(chatId, { text: '⏳ Downloading...' })
-      try {
-        const file = await runYtDlp(text)
-        await sock.sendMessage(chatId, {
-          document: fs.readFileSync(path.join(DOWNLOAD_DIR, file)),
-          fileName: file,
-          mimetype: 'video/mp4'
-        })
-      } catch {
-        await sock.sendMessage(chatId, { text: '❌ Gagal download' })
-      }
+    // AUTO REPLY
+    if (/^(halo|hai|hello)$/i.test(text)) {
+      await sock.sendMessage(chatId, { text: `Halo 👋 gue ${BOT_NAME}` })
       return
     }
 
     // COMMAND
     if (text.startsWith(PREFIX)) {
       const [cmd, ...args] = text.slice(1).split(' ')
-      const url = args[0]
-
       switch (cmd.toLowerCase()) {
-        case 'yt':
-        case 'dl':
-          await sock.sendMessage(chatId, { text: '⏳ Download video...' })
-          try {
-            const file = await runYtDlp(url)
-            await sock.sendMessage(chatId, {
-              document: fs.readFileSync(path.join(DOWNLOAD_DIR, file)),
-              fileName: file,
-              mimetype: 'video/mp4'
-            })
-          } catch {
-            await sock.sendMessage(chatId, { text: '❌ Gagal download' })
-          }
-          break
-
-        case 'mp3':
-          await sock.sendMessage(chatId, { text: '🎵 Download audio...' })
-          try {
-            const file = await runYtDlp(url, true)
-            await sock.sendMessage(chatId, {
-              document: fs.readFileSync(path.join(DOWNLOAD_DIR, file)),
-              fileName: file,
-              mimetype: 'audio/mpeg'
-            })
-          } catch {
-            await sock.sendMessage(chatId, { text: '❌ Gagal download' })
-          }
-          break
-
-        case 'ai':
-          const reply = await aiReply(args.join(' '))
-          await sock.sendMessage(chatId, { text: reply })
+        case 'ping':
+          await sock.sendMessage(chatId, { text: 'pong 🏓' })
           break
 
         case 'menu':
           await sock.sendMessage(chatId, {
             text: `
 📜 *MENU*
-!yt <url>
-!mp3 <url>
-!dl <url>
+!ping
+!menu
 !ai <teks>
 `
           })
           break
 
+        case 'ai':
+          if (!args.length) {
+            await sock.sendMessage(chatId, {
+              text: 'Contoh: !ai jelaskan javascript'
+            })
+            break
+          }
+          const reply = await aiReply(args.join(' '))
+          await sock.sendMessage(chatId, { text: reply })
+          break
+
         default:
-          await sock.sendMessage(chatId, { text: 'Command tidak dikenal ❌' })
+          await sock.sendMessage(chatId, {
+            text: 'Command tidak dikenal ❌'
+          })
       }
       return
     }
 
-    // DEFAULT AI
+    // DEFAULT AI CHAT
     const reply = await aiReply(text)
     await sock.sendMessage(chatId, { text: reply })
   })
 }
 
+// RUN
 startBot().catch(console.error)
