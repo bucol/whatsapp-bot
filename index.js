@@ -16,16 +16,12 @@ const CryptoJS = require('crypto-js');
 const Stripe = require('stripe');
 
 // === CONFIG API KEYS ===
-const openai = new OpenAI({ apiKey: 'sk-your-openai-key-here' });
-const stripe = Stripe('sk_test_your_stripe_test_key');
+const openai = new OpenAI({ apiKey: 'sk-your-openai-key-here' }); // Ganti dengan keymu
+const stripe = Stripe('sk_test_your_stripe_test_key'); // Test mode gratis
 
-// === DATABASE LOWDB OTOMATIS (pure JSON) ===
+// === DATABASE LOWDB OTOMATIS ===
 const dbAdapter = new JSONFile('db.json');
 const db = new Low(dbAdapter);
-await db.read();
-db.data ||= { users: {}, logs: [] }; // Init kalau file baru
-await db.write();
-console.log('Database db.json siap otomatis!');
 
 // === I18N & LOGGER ===
 i18n.configure({
@@ -41,27 +37,32 @@ const logger = winston.createLogger({
 // === FOLDER & DASHBOARD ===
 if (!fs.existsSync('./downloads')) fs.mkdirSync('./downloads');
 const app = express();
-app.get('/analytics', (req, res) => {
-    res.json({ users: Object.values(db.data.users), total_logs: db.data.logs.length });
+app.get('/analytics', async (req, res) => {
+    await db.read();
+    res.json({ users: Object.values(db.data?.users || {}), total_logs: db.data?.logs?.length || 0 });
 });
-app.listen(3000, () => console.log('Dashboard: http://localhost:3000/analytics'));
+app.listen(3000, () => console.log('Dashboard jalan di http://localhost:3000/analytics'));
 
 // === HELPER FUNCTIONS ===
-async function randomDelay(min = 2000, max = 15000) {
+async function randomDelay(min = 2000, max = 18000) {
     await delay(Math.floor(Math.random() * (max - min + 1)) + min);
 }
 
 async function sendWithHumanBehavior(sock, jid, msg) {
     await sock.presenceSubscribe(jid);
-    await randomDelay(2000, 8000);
-    const actions = ['composing', 'recording', 'paused'];
-    await sock.sendPresenceUpdate(actions[Math.floor(Math.random() * actions.length)], jid);
-    await randomDelay(4000, 12000);
+    await randomDelay(2000, 10000);
+    const actions = ['composing', 'recording', 'paused', 'available'];
+    for (let i = 0; i < Math.floor(Math.random() * 3) + 1; i++) { // Kadang ganti presence tengah jalan
+        await sock.sendPresenceUpdate(actions[Math.floor(Math.random() * actions.length)], jid);
+        await randomDelay(3000, 8000);
+    }
     await sock.sendMessage(jid, msg);
     await sock.sendPresenceUpdate('paused', jid);
 }
 
-async function saveUser(jid, updates) {
+async function saveUser(jid, updates = {}) {
+    await db.read();
+    db.data.users ||= {};
     db.data.users[jid] ||= { interactions: 0, downloads: 0, broadcasts: 0, lang: 'id', game_state: {}, reminders: [], custom_keywords: {} };
     Object.assign(db.data.users[jid], updates);
     db.data.users[jid].interactions = (db.data.users[jid].interactions || 0) + 1;
@@ -69,18 +70,28 @@ async function saveUser(jid, updates) {
 }
 
 function logAction(jid, action) {
-    const encrypted = CryptoJS.AES.encrypt(JSON.stringify({ jid, action, time: new Date() }), 'secret123').toString();
-    db.data.logs.push(encrypted);
-    await db.write();
+    db.read().then(() => {
+        db.data.logs ||= [];
+        const encrypted = CryptoJS.AES.encrypt(JSON.stringify({ jid, action, time: new Date() }), 'secret123').toString();
+        db.data.logs.push(encrypted);
+        db.write();
+    });
 }
 
-// === CONNECT TO WHATSAPP ===
-async function connectToWhatsApp() {
+// === INIT DB & START BOT ===
+async function startBot() {
+    await db.read();
+    db.data ||= { users: {}, logs: [] };
+    await db.write();
+    console.log('Database db.json otomatis siap! Bot starting...');
+
     const browsers = [
         ['Chrome (Linux)', '', ''],
         ['Safari (MacOS)', '', ''],
-        ['Firefox (Windows)', '', '']
+        ['Firefox (Windows)', '', ''],
+        ['Edge (Android)', '', '']
     ];
+
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     const sock = makeWASocket({
         logger: pino({ level: 'silent' }),
@@ -90,7 +101,7 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('qr', qr => {
-        console.log('Scan QR ini di WhatsApp:');
+        console.log('Scan QR ini di WhatsApp kamu:');
         qrTerminal.generate(qr, { small: true });
     });
 
@@ -100,21 +111,19 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const reconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (reconnect) connectToWhatsApp();
+            if (reconnect) startBot();
         } else if (connection === 'open') {
-            console.log('Bot connected! Super powerful & human-like siap jalan.');
+            console.log('Bot connected! Powerfull, human-like, dan susah detect siap beraksi 🔥');
         }
     });
 
-    // Call handling
     sock.ev.on('call', async calls => {
         for (const call of calls) {
             await sock.rejectCall(call.id, call.from);
-            await sendWithHumanBehavior(sock, call.from, { text: 'Sorry ya, bot nggak bisa angkat call. Kirim voice message aja!' });
+            await sendWithHumanBehavior(sock, call.from, { text: 'Wah sorry bro, bot lagi ga bisa angkat call nih. Kirim voice message aja ya, aku transkrip!' });
         }
     });
 
-    // Messages handler
     sock.ev.on('messages.upsert', async m => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
@@ -122,12 +131,12 @@ async function connectToWhatsApp() {
         const sender = msg.key.remoteJid;
         const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').toLowerCase().trim();
 
-        await saveUser(sender, {});
+        await saveUser(sender);
         logAction(sender, text);
 
         if (text === 'menu') {
             await sendWithHumanBehavior(sock, sender, {
-                text: 'Halo bro! Menu bot super lengkap nih:',
+                text: 'Halo! Botku lagi online nih 😎 Pilih menu di bawah ya:',
                 buttons: [
                     { buttonId: 'sticker', buttonText: { displayText: 'Buat Sticker' }, type: 1 },
                     { buttonId: 'game', buttonText: { displayText: 'Main Game' }, type: 1 },
@@ -137,20 +146,20 @@ async function connectToWhatsApp() {
                 ]
             });
         } else if (text.startsWith('sticker') && msg.message.imageMessage) {
+            await sendWithHumanBehavior(sock, sender, { text: 'Bentar ya, lagi bikin sticker...' });
             const buffer = await sock.downloadMediaMessage(msg);
             const stickerBuffer = await sharp(buffer).webp().toBuffer();
             await sendWithHumanBehavior(sock, sender, { sticker: stickerBuffer });
         } else if (text.startsWith('generate ')) {
+            await sendWithHumanBehavior(sock, sender, { text: 'Oke, lagi generate gambar AI nih... Sabar ya!' });
             const prompt = text.slice(9);
             const response = await openai.images.generate({ model: 'dall-e-3', prompt, n: 1 });
             const imageUrl = response.data[0].url;
-            await sendWithHumanBehavior(sock, sender, { image: { url: imageUrl }, caption: 'Ini gambar AI sesuai requestmu!' });
+            await sendWithHumanBehavior(sock, sender, { image: { url: imageUrl }, caption: 'Nih hasilnya! Keren kan? 🔥' });
         } else {
-            await sendWithHumanBehavior(sock, sender, { text: 'Halo! Ada yang bisa dibantu? Ketik "menu" buat opsi lengkap ya 😊' });
+            await sendWithHumanBehavior(sock, sender, { text: 'Halo bro! Ada yang bisa aku bantu? Ketik "menu" buat liat opsi lengkap ya 😉' });
         }
     });
-
-    return sock;
 }
 
-connectToWhatsApp().catch(err => console.error('Error fatal:', err));
+startBot().catch(err => console.error('Error fatal:', err));
