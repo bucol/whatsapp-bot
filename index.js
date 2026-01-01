@@ -1,6 +1,7 @@
 /**
- * WhatsApp Bot – STEP B
+ * WhatsApp Bot – STEP B FIXED
  * Groq AI + Anti-Ban + Downloader (yt-dlp)
+ * FIX: Proper MIME (video/audio) – no more PDF
  */
 
 require('dotenv').config()
@@ -17,13 +18,14 @@ const axios = require('axios')
 const readline = require('readline')
 const fs = require('fs-extra')
 const { exec } = require('child_process')
+const path = require('path')
 
 // ================= CONFIG =================
 const PREFIX = '!'
 const BOT_NAME = 'WA-BOT'
 const DOWNLOAD_DIR = './downloads'
 
-// GROQ MODELS (fallback)
+// GROQ MODELS
 const GROQ_MODELS = [
   'llama-3.1-8b-instant',
   'mixtral-8x7b-32768',
@@ -119,30 +121,26 @@ async function enqueue(chatId, task) {
 }
 
 // ================= DOWNLOADER =================
-function runYtDlp(cmd) {
+function run(cmd) {
   return new Promise((resolve, reject) => {
-    exec(cmd, (err, stdout, stderr) => {
-      if (err) reject(stderr || err.message)
-      else resolve(stdout)
-    })
+    exec(cmd, (err) => (err ? reject(err) : resolve()))
   })
 }
 
-async function downloadMedia(url, type = 'auto') {
+async function downloadMedia(url, type) {
   const id = Date.now()
   const out = `${DOWNLOAD_DIR}/${id}.%(ext)s`
 
-  let format = ''
-  if (type === 'audio') {
-    format = '-x --audio-format mp3'
-  } else if (type === 'video') {
-    format = '-f mp4'
-  }
+  let flags = ''
+  if (type === 'audio') flags = '-x --audio-format mp3'
+  if (type === 'video') flags = '-f mp4'
 
-  await runYtDlp(`yt-dlp ${format} -o "${out}" "${url}"`)
-  const files = await fs.readdir(DOWNLOAD_DIR)
-  const file = files.find(f => f.startsWith(String(id)))
-  return `${DOWNLOAD_DIR}/${file}`
+  await run(`yt-dlp ${flags} -o "${out}" "${url}"`)
+  const file = (await fs.readdir(DOWNLOAD_DIR))
+    .map(f => path.join(DOWNLOAD_DIR, f))
+    .find(f => f.includes(id))
+
+  return file
 }
 
 // ================= BOT =================
@@ -186,55 +184,43 @@ async function startBot() {
       ''
 
     if (!text) return
-    const limit = isRateLimited(sender)
-    if (limit.limited) {
-      await enqueue(chatId, async () => {
-        await sock.sendMessage(chatId, {
-          text: limit.reason === 'cooldown'
-            ? '⏳ Pelan-pelan ya 😄'
-            : '🚦 Kebanyakan request.'
-        })
-      })
-      return
-    }
+    if (isRateLimited(sender).limited) return
 
     await enqueue(chatId, async () => {
       await sock.sendPresenceUpdate('composing', chatId)
       await sleep(rand(TYPING_DELAY_MIN, TYPING_DELAY_MAX))
 
-      // ===== COMMAND =====
       if (text.startsWith(PREFIX)) {
         const [cmd, url] = text.slice(1).split(' ')
-        if (!url && ['dl','yta','ytv'].includes(cmd)) {
-          await sock.sendMessage(chatId, { text: 'URL-nya mana?' })
-          return
-        }
+        if (['dl','yta','ytv'].includes(cmd)) {
+          if (!url) {
+            await sock.sendMessage(chatId, { text: 'URL-nya mana?' })
+            return
+          }
 
-        if (cmd === 'dl' || cmd === 'yta' || cmd === 'ytv') {
           await sock.sendMessage(chatId, { text: '⏬ Downloading...' })
 
-          const type =
-            cmd === 'yta' ? 'audio' :
-            cmd === 'ytv' ? 'video' : 'auto'
-
+          const type = cmd === 'yta' ? 'audio' : 'video'
           try {
             const file = await downloadMedia(url, type)
-            await sock.sendMessage(chatId, {
-              document: { url: file },
-              fileName: file.split('/').pop()
-            })
-            await fs.remove(file)
-          } catch (e) {
-            await sock.sendMessage(chatId, {
-              text: '❌ Gagal download.'
-            })
-          }
-          return
-        }
+            const ext = path.extname(file)
 
-        if (cmd === 'ai') {
-          const reply = await aiReply(text.slice(4))
-          await sock.sendMessage(chatId, { text: reply })
+            if (type === 'audio') {
+              await sock.sendMessage(chatId, {
+                audio: { url: file },
+                mimetype: 'audio/mpeg'
+              })
+            } else {
+              await sock.sendMessage(chatId, {
+                video: { url: file },
+                mimetype: `video/${ext.replace('.', '')}`
+              })
+            }
+
+            await fs.remove(file)
+          } catch {
+            await sock.sendMessage(chatId, { text: '❌ Gagal download.' })
+          }
           return
         }
       }
