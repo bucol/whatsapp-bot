@@ -83,42 +83,48 @@ async function aiReply(text) {
   return 'AI error.'
 }
 
-// ================= UI (NATIVE BUTTONS) =================
+// ================= UI (NATIVE BUTTONS – FIXED) =================
+function sendInteractive(sock, chatId, interactive) {
+  return sock.sendMessage(chatId, {
+    viewOnceMessage: {
+      message: {
+        interactiveMessage: interactive
+      }
+    }
+  })
+}
+
 function mainMenu(lang) {
-  return {
-    interactiveMessage: proto.Message.InteractiveMessage.create({
-      body: proto.Message.InteractiveMessage.Body.create({
-        text: TXT[lang].hi
-      }),
-      footer: proto.Message.InteractiveMessage.Footer.create({
-        text: BOT_NAME
-      }),
-      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-        buttons: [
-          { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'AI', title: TXT[lang].ai }) },
-          { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'DL', title: TXT[lang].dl }) },
-          { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'TOOLS', title: TXT[lang].tools }) }
-        ]
-      })
+  return proto.Message.InteractiveMessage.create({
+    body: proto.Message.InteractiveMessage.Body.create({
+      text: TXT[lang].hi
+    }),
+    footer: proto.Message.InteractiveMessage.Footer.create({
+      text: BOT_NAME
+    }),
+    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+      buttons: [
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'AI', title: TXT[lang].ai }) },
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'DL', title: TXT[lang].dl }) },
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'TOOLS', title: TXT[lang].tools }) }
+      ]
     })
-  }
+  })
 }
 
 function downloadMenu() {
-  return {
-    interactiveMessage: proto.Message.InteractiveMessage.create({
-      body: proto.Message.InteractiveMessage.Body.create({
-        text: 'Pilih format download:'
-      }),
-      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-        buttons: [
-          { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'VIDEO', title: '🎥 Video' }) },
-          { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'AUDIO', title: '🎵 Audio' }) },
-          { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'CANCEL', title: '❌ Cancel' }) }
-        ]
-      })
+  return proto.Message.InteractiveMessage.create({
+    body: proto.Message.InteractiveMessage.Body.create({
+      text: 'Pilih format download:'
+    }),
+    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+      buttons: [
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'VIDEO', title: '🎥 Video' }) },
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'AUDIO', title: '🎵 Audio' }) },
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'CANCEL', title: '❌ Cancel' }) }
+      ]
     })
-  }
+  })
 }
 
 // ================= BOT =================
@@ -158,17 +164,16 @@ async function startBot() {
     if (!session.has(sender)) {
       const lang = detectLang(text)
       session.set(sender, { lang, mode: null })
-      await sock.sendMessage(chatId, mainMenu(lang))
+      await sendInteractive(sock, chatId, mainMenu(lang))
       return
     }
 
     const s = session.get(sender)
     const lang = s.lang
 
-    // HANDLE BUTTON
+    // BUTTON RESPONSE
     const btn =
-      msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.name ||
-      msg.message.buttonsResponseMessage?.selectedButtonId
+      msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.name
 
     if (btn === 'AI') {
       s.mode = 'AI'
@@ -194,12 +199,10 @@ async function startBot() {
       activeDownloads.add(sender)
       await sock.sendMessage(chatId, { text: TXT[lang].downloading })
 
-      const type = btn === 'AUDIO' ? 'audio' : 'video'
       const id = Date.now()
       const out = `${DOWNLOAD_DIR}/${id}.%(ext)s`
-
       const args =
-        type === 'audio'
+        btn === 'AUDIO'
           ? ['-x', '--audio-format', 'mp3', '-o', out, url]
           : ['-f', 'mp4', '-o', out, url]
 
@@ -214,7 +217,7 @@ async function startBot() {
           .map(f => path.join(DOWNLOAD_DIR, f))
           .find(f => f.includes(id))
 
-        if (type === 'audio') {
+        if (btn === 'AUDIO') {
           await sock.sendMessage(chatId, { audio: { url: file }, mimetype: 'audio/mpeg' })
         } else {
           await sock.sendMessage(chatId, { video: { url: file } })
@@ -227,7 +230,7 @@ async function startBot() {
     // LINK DETECT
     if (s.mode === 'DL' && /https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)) {
       pendingLink.set(sender, text)
-      await sock.sendMessage(chatId, downloadMenu())
+      await sendInteractive(sock, chatId, downloadMenu())
       return
     }
 
@@ -239,7 +242,7 @@ async function startBot() {
     }
 
     // FALLBACK
-    await sock.sendMessage(chatId, mainMenu(lang))
+    await sendInteractive(sock, chatId, mainMenu(lang))
   })
 }
 
