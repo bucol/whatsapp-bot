@@ -32,57 +32,80 @@ const activeDownload = new Set()
 const getText = m =>
   m.message?.conversation ||
   m.message?.extendedTextMessage?.text ||
-  m.message?.imageMessage?.caption ||
-  m.message?.videoMessage?.caption ||
+  m.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
   ''
 
 const detectLang = t =>
   /(gue|lu|kok|udah|bang|woy)/i.test(t) ? 'id' : 'en'
 
+// ================= TEXT =================
 const TXT = {
   id: {
-    menu:
-`👋 Halo, gue ${BOT_NAME}
-
-1️⃣ AI Chat
-2️⃣ Downloader (YT / TikTok / IG)
-3️⃣ Tools (coming soon)
-
-Balas angka (1–3)
-Ketik *menu* kapan aja.`,
-    ai: '🤖 AI siap. Kirim pesan.\n\nKetik *menu* buat balik.',
-    askLink: '⬇️ Kirim link video (YT / Shorts / IG / TikTok).',
-    askFormat:
-`Pilih format:
-1️⃣ Video (MP4)
-2️⃣ Audio (MP3)`,
+    hi: `👋 Halo, gue ${BOT_NAME}`,
+    ai: '🤖 AI siap. Kirim pesan apa aja.',
+    askLink: '⬇️ Kirim link video (YT / IG / TikTok).',
     downloading: '⏬ Download dimulai...',
-    done: '✅ Selesai.\n\nKetik *menu* buat kembali.',
-    busy: '⏳ Masih ada proses download.',
-    invalid: '❌ Format tidak valid.'
+    done: '✅ Selesai.',
+    busy: '⏳ Masih ada proses.',
+    invalid: '❌ Pilihan tidak valid.'
   },
   en: {
-    menu:
-`👋 Hi, I'm ${BOT_NAME}
-
-1️⃣ AI Chat
-2️⃣ Downloader (YT / TikTok / IG)
-3️⃣ Tools (coming soon)
-
-Reply 1–3
-Type *menu* anytime.`,
+    hi: `👋 Hi, I'm ${BOT_NAME}`,
     ai: '🤖 AI ready.',
     askLink: '⬇️ Send the video link.',
-    askFormat:
-`Choose format:
-1️⃣ Video (MP4)
-2️⃣ Audio (MP3)`,
     downloading: '⏬ Download started...',
-    done: '✅ Done.\n\nType *menu* to return.',
-    busy: '⏳ Download in progress.',
-    invalid: '❌ Invalid format.'
+    done: '✅ Done.',
+    busy: '⏳ Process running.',
+    invalid: '❌ Invalid choice.'
   }
 }
+
+// ================= LIST BUILDER =================
+const mainMenu = lang => ({
+  text: TXT[lang].hi,
+  footer: 'Select a menu',
+  title: '📋 Main Menu',
+  buttonText: 'Open Menu',
+  sections: [
+    {
+      title: 'Features',
+      rows: [
+        { title: '🤖 AI Chat', rowId: 'MENU_AI' },
+        { title: '⬇️ Downloader', rowId: 'MENU_DL' },
+        { title: '🧰 Tools', rowId: 'MENU_TOOLS' }
+      ]
+    }
+  ]
+})
+
+const formatMenu = lang => ({
+  text: 'Pilih format',
+  footer: 'Downloader',
+  title: '🎞 Download Format',
+  buttonText: 'Choose',
+  sections: [
+    {
+      title: 'Format',
+      rows: [
+        { title: '🎥 Video (MP4)', rowId: 'DL_VIDEO' },
+        { title: '🎵 Audio (MP3)', rowId: 'DL_AUDIO' }
+      ]
+    }
+  ]
+})
+
+const backMenu = lang => ({
+  text: 'Kembali ke menu utama',
+  footer: BOT_NAME,
+  title: '⬅️ Back',
+  buttonText: 'Menu',
+  sections: [
+    {
+      title: 'Navigation',
+      rows: [{ title: '📋 Main Menu', rowId: 'MENU_HOME' }]
+    }
+  ]
+})
 
 // ================= AI =================
 async function aiReply(text) {
@@ -128,102 +151,101 @@ async function start() {
     const chatId = msg.key.remoteJid
     const isGroup = chatId.endsWith('@g.us')
     const sender = jidNormalizedUser(msg.key.participant || chatId)
-    const text = getText(msg).trim()
-    const lower = text.toLowerCase()
+    const text = getText(msg)
+    const key = isGroup ? `${chatId}:${sender}` : sender
 
-    const sessionKey = isGroup ? `${chatId}:${sender}` : sender
-
-    // ===== GROUP ENTRY FILTER (ONLY IF NO SESSION YET) =====
-    if (isGroup && !session.has(sessionKey)) {
+    // ===== GROUP ENTRY FILTER =====
+    if (isGroup && !session.has(key)) {
       const mentioned =
         msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
-      const replied =
-        msg.message?.extendedTextMessage?.contextInfo?.participant === sock.user.id
-
-      if (
-        !mentioned.includes(sock.user.id) &&
-        !replied &&
-        lower !== 'menu'
-      ) return
+      if (!mentioned.includes(sock.user.id)) return
     }
 
-    // ===== INIT SESSION =====
-    if (!session.has(sessionKey)) {
+    // ===== INIT =====
+    if (!session.has(key)) {
       const lang = detectLang(text)
-      session.set(sessionKey, { lang, mode: null })
-      await sock.sendMessage(chatId, { text: TXT[lang].menu })
+      session.set(key, { lang, mode: null })
+      await sock.sendMessage(chatId, { listMessage: mainMenu(lang) })
       return
     }
 
-    const s = session.get(sessionKey)
+    const s = session.get(key)
     const lang = s.lang
 
-    // ===== MENU RESET =====
-    if (lower === 'menu') {
+    // ===== MENU HANDLER =====
+    if (text === 'MENU_HOME') {
       s.mode = null
-      pendingLink.delete(sessionKey)
-      await sock.sendMessage(chatId, { text: TXT[lang].menu })
+      pendingLink.delete(key)
+      await sock.sendMessage(chatId, { listMessage: mainMenu(lang) })
       return
     }
 
-    // ===== MAIN MENU =====
-    if (!s.mode) {
-      if (lower === '1') {
-        s.mode = 'AI'
-        await sock.sendMessage(chatId, { text: TXT[lang].ai })
-        return
-      }
-      if (lower === '2') {
-        s.mode = 'DL'
-        await sock.sendMessage(chatId, { text: TXT[lang].askLink })
-        return
-      }
-      await sock.sendMessage(chatId, { text: TXT[lang].menu })
+    if (text === 'MENU_AI') {
+      s.mode = 'AI'
+      await sock.sendMessage(chatId, {
+        text: TXT[lang].ai,
+        listMessage: backMenu(lang)
+      })
       return
     }
 
-    // ===== AI MODE =====
+    if (text === 'MENU_DL') {
+      s.mode = 'DL'
+      await sock.sendMessage(chatId, {
+        text: TXT[lang].askLink,
+        listMessage: backMenu(lang)
+      })
+      return
+    }
+
+    // ===== AI =====
     if (s.mode === 'AI') {
       const r = await aiReply(text)
-      await sock.sendMessage(chatId, { text: r + '\n\n—\nmenu' })
+      await sock.sendMessage(chatId, {
+        text: r,
+        listMessage: backMenu(lang)
+      })
       return
     }
 
-    // ===== DL STEP 1: LINK =====
+    // ===== DL LINK =====
     if (s.mode === 'DL' && /https?:\/\//i.test(text)) {
-      pendingLink.set(sessionKey, text)
-      await sock.sendMessage(chatId, { text: TXT[lang].askFormat })
+      pendingLink.set(key, text)
+      await sock.sendMessage(chatId, { listMessage: formatMenu(lang) })
       return
     }
 
-    // ===== DL STEP 2: FORMAT =====
-    if (s.mode === 'DL' && pendingLink.has(sessionKey)) {
-      if (!['1', '2'].includes(lower)) {
-        await sock.sendMessage(chatId, { text: TXT[lang].invalid })
-        return
-      }
-
-      if (activeDownload.has(sessionKey)) {
+    // ===== DL FORMAT =====
+    if (s.mode === 'DL' && pendingLink.has(key)) {
+      if (activeDownload.has(key)) {
         await sock.sendMessage(chatId, { text: TXT[lang].busy })
         return
       }
 
-      activeDownload.add(sessionKey)
+      const isAudio = text === 'DL_AUDIO'
+      if (!['DL_AUDIO', 'DL_VIDEO'].includes(text)) {
+        await sock.sendMessage(chatId, { text: TXT[lang].invalid })
+        return
+      }
+
+      activeDownload.add(key)
       await sock.sendMessage(chatId, { text: TXT[lang].downloading })
 
-      const url = pendingLink.get(sessionKey)
-      pendingLink.delete(sessionKey)
+      const url = pendingLink.get(key)
+      pendingLink.delete(key)
 
       const out = `${DOWNLOAD_DIR}/${Date.now()}.%(ext)s`
-      const args =
-        lower === '2'
-          ? ['-x', '--audio-format', 'mp3', '-o', out, url]
-          : ['-f', 'mp4', '-o', out, url]
+      const args = isAudio
+        ? ['-x', '--audio-format', 'mp3', '-o', out, url]
+        : ['-f', 'mp4', '-o', out, url]
 
       spawn('yt-dlp', args).on('close', async () => {
-        activeDownload.delete(sessionKey)
+        activeDownload.delete(key)
         s.mode = null
-        await sock.sendMessage(chatId, { text: TXT[lang].done })
+        await sock.sendMessage(chatId, {
+          text: TXT[lang].done,
+          listMessage: mainMenu(lang)
+        })
       })
     }
   })
