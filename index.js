@@ -4,128 +4,13 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
-  jidNormalizedUser,
-  proto
+  fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys')
 
 const Pino = require('pino')
-const axios = require('axios')
-const fs = require('fs-extra')
-const path = require('path')
-const { spawn } = require('child_process')
 
 // ================= CONFIG =================
 const BOT_NAME = 'WhatsappBotGro'
-const DOWNLOAD_DIR = './downloads'
-
-const GROQ_MODELS = [
-  'llama-3.1-8b-instant',
-  'mixtral-8x7b-32768'
-]
-
-fs.ensureDirSync(DOWNLOAD_DIR)
-
-// ================= STATE =================
-const session = new Map() // sender -> { lang, mode }
-const pendingLink = new Map()
-const activeDownloads = new Set()
-
-// ================= LANGUAGE =================
-function detectLang(t = '') {
-  t = t.toLowerCase()
-  if (/(gua|lu|bang|woy|udah|kok)/.test(t)) return 'id'
-  if (/[áéíóúñ¿¡]/.test(t)) return 'es'
-  if (/[ãõç]/.test(t)) return 'pt'
-  return 'en'
-}
-
-const TXT = {
-  id: {
-    hi: `Halo 👋 gue ${BOT_NAME}. Pilih menu di bawah.`,
-    ai: '🤖 AI Chat',
-    dl: '⬇️ Downloader',
-    tools: '🧰 Tools',
-    sendLink: 'Kirim link videonya.',
-    downloading: '⏬ Download dimulai...',
-    busy: '⏳ Masih ada proses.',
-    fail: '❌ Gagal.'
-  },
-  en: {
-    hi: `Hi 👋 I'm ${BOT_NAME}. Choose a menu below.`,
-    ai: '🤖 AI Chat',
-    dl: '⬇️ Downloader',
-    tools: '🧰 Tools',
-    sendLink: 'Send the video link.',
-    downloading: '⏬ Download started...',
-    busy: '⏳ Process running.',
-    fail: '❌ Failed.'
-  }
-}
-
-// ================= AI =================
-async function aiReply(text) {
-  for (const model of GROQ_MODELS) {
-    try {
-      const r = await axios.post(
-        'https://api.groq.com/openai/v1/chat/completions',
-        { model, messages: [{ role: 'user', content: text }] },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      )
-      return r.data.choices[0].message.content
-    } catch {}
-  }
-  return 'AI error.'
-}
-
-// ================= UI (NATIVE BUTTONS – FIXED) =================
-function sendInteractive(sock, chatId, interactive) {
-  return sock.sendMessage(chatId, {
-    viewOnceMessage: {
-      message: {
-        interactiveMessage: interactive
-      }
-    }
-  })
-}
-
-function mainMenu(lang) {
-  return proto.Message.InteractiveMessage.create({
-    body: proto.Message.InteractiveMessage.Body.create({
-      text: TXT[lang].hi
-    }),
-    footer: proto.Message.InteractiveMessage.Footer.create({
-      text: BOT_NAME
-    }),
-    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-      buttons: [
-        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'AI', title: TXT[lang].ai }) },
-        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'DL', title: TXT[lang].dl }) },
-        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'TOOLS', title: TXT[lang].tools }) }
-      ]
-    })
-  })
-}
-
-function downloadMenu() {
-  return proto.Message.InteractiveMessage.create({
-    body: proto.Message.InteractiveMessage.Body.create({
-      text: 'Pilih format download:'
-    }),
-    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-      buttons: [
-        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'VIDEO', title: '🎥 Video' }) },
-        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'AUDIO', title: '🎵 Audio' }) },
-        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ id: 'CANCEL', title: '❌ Cancel' }) }
-      ]
-    })
-  })
-}
 
 // ================= BOT =================
 async function startBot() {
@@ -141,7 +26,7 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', u => {
-    if (u.connection === 'open') console.log('✅ WhatsappBotGro connected')
+    if (u.connection === 'open') console.log(`✅ ${BOT_NAME} connected`)
     if (u.connection === 'close' &&
         u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
       startBot()
@@ -153,96 +38,23 @@ async function startBot() {
     if (!msg.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
-    const sender = jidNormalizedUser(msg.key.participant || chatId)
 
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      ''
-
-    // INIT SESSION
-    if (!session.has(sender)) {
-      const lang = detectLang(text)
-      session.set(sender, { lang, mode: null })
-      await sendInteractive(sock, chatId, mainMenu(lang))
-      return
-    }
-
-    const s = session.get(sender)
-    const lang = s.lang
-
-    // BUTTON RESPONSE
-    const btn =
-      msg.message.interactiveResponseMessage?.nativeFlowResponseMessage?.name
-
-    if (btn === 'AI') {
-      s.mode = 'AI'
-      await sock.sendMessage(chatId, { text: '💬 AI ready.' })
-      return
-    }
-
-    if (btn === 'DL') {
-      s.mode = 'DL'
-      await sock.sendMessage(chatId, { text: TXT[lang].sendLink })
-      return
-    }
-
-    if (btn === 'VIDEO' || btn === 'AUDIO') {
-      const url = pendingLink.get(sender)
-      if (!url) return
-
-      if (activeDownloads.has(sender)) {
-        await sock.sendMessage(chatId, { text: TXT[lang].busy })
-        return
-      }
-
-      activeDownloads.add(sender)
-      await sock.sendMessage(chatId, { text: TXT[lang].downloading })
-
-      const id = Date.now()
-      const out = `${DOWNLOAD_DIR}/${id}.%(ext)s`
-      const args =
-        btn === 'AUDIO'
-          ? ['-x', '--audio-format', 'mp3', '-o', out, url]
-          : ['-f', 'mp4', '-o', out, url]
-
-      const p = spawn('yt-dlp', args)
-      p.on('close', async code => {
-        activeDownloads.delete(sender)
-        if (code !== 0) {
-          await sock.sendMessage(chatId, { text: TXT[lang].fail })
-          return
+    await sock.sendMessage(chatId, {
+      text: `Halo 👋 gue ${BOT_NAME}`,
+      footer: BOT_NAME,
+      title: 'Menu Utama',
+      buttonText: 'Buka Menu',
+      sections: [
+        {
+          title: 'Fitur',
+          rows: [
+            { title: '🤖 AI Chat', rowId: 'AI' },
+            { title: '⬇️ Downloader', rowId: 'DL' },
+            { title: '🧰 Tools', rowId: 'TOOLS' }
+          ]
         }
-        const file = (await fs.readdir(DOWNLOAD_DIR))
-          .map(f => path.join(DOWNLOAD_DIR, f))
-          .find(f => f.includes(id))
-
-        if (btn === 'AUDIO') {
-          await sock.sendMessage(chatId, { audio: { url: file }, mimetype: 'audio/mpeg' })
-        } else {
-          await sock.sendMessage(chatId, { video: { url: file } })
-        }
-        await fs.remove(file)
-      })
-      return
-    }
-
-    // LINK DETECT
-    if (s.mode === 'DL' && /https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)) {
-      pendingLink.set(sender, text)
-      await sendInteractive(sock, chatId, downloadMenu())
-      return
-    }
-
-    // AI CHAT
-    if (s.mode === 'AI') {
-      const reply = await aiReply(text)
-      await sock.sendMessage(chatId, { text: reply })
-      return
-    }
-
-    // FALLBACK
-    await sendInteractive(sock, chatId, mainMenu(lang))
+      ]
+    })
   })
 }
 
