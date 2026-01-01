@@ -17,17 +17,15 @@ const { spawn } = require('child_process')
 // ================= CONFIG =================
 const BOT_NAME = 'WhatsappBotGro'
 const DOWNLOAD_DIR = './downloads'
-
 const GROQ_MODELS = [
   'llama-3.1-8b-instant',
   'mixtral-8x7b-32768',
   'llama-3.1-70b-versatile'
 ]
-
 fs.ensureDirSync(DOWNLOAD_DIR)
 
 // ================= STATE =================
-const session = new Map()
+const session = new Map() // sender -> { lang, mode }
 const pendingLink = new Map()
 const activeDownloads = new Set()
 
@@ -42,24 +40,50 @@ function detectLang(t = '') {
 
 const TXT = {
   id: {
-    hi: `Halo 👋 gue ${BOT_NAME}. Pilih menu di bawah.`,
-    ai: '🤖 AI Chat',
-    dl: '⬇️ Downloader',
-    tools: '🧰 Tools',
-    sendLink: 'Kirim link videonya.',
+    menu: () =>
+`👋 Halo, gue ${BOT_NAME}
+
+1️⃣ AI Chat
+2️⃣ Downloader (YT / TikTok / IG)
+3️⃣ Tools (coming soon)
+
+Balas angka (1–3).
+Ketik *menu* kapan saja.`,
+    aiReady: `🤖 AI siap. Tulis apa saja.\n\nKetik *menu* untuk kembali.`,
+    sendLink: `⬇️ Kirim link videonya.\n\nKetik *menu* untuk batal.`,
+    chooseFmt:
+`Pilih format:
+1️⃣ Video (MP4)
+2️⃣ Audio (MP3)
+
+Balas angka (1–2) atau *menu*.`,
     downloading: '⏬ Download dimulai…',
-    busy: '⏳ Masih ada proses.',
-    fail: '❌ Gagal.'
+    busy: '⏳ Masih ada proses berjalan.',
+    fail: '❌ Gagal memproses.',
+    done: '✅ Selesai.\n\nKetik *menu*.'
   },
   en: {
-    hi: `Hi 👋 I'm ${BOT_NAME}. Choose a menu below.`,
-    ai: '🤖 AI Chat',
-    dl: '⬇️ Downloader',
-    tools: '🧰 Tools',
-    sendLink: 'Send the video link.',
+    menu: () =>
+`👋 Hi, I'm ${BOT_NAME}
+
+1️⃣ AI Chat
+2️⃣ Downloader (YT / TikTok / IG)
+3️⃣ Tools (coming soon)
+
+Reply with a number (1–3).
+Type *menu* anytime.`,
+    aiReady: `🤖 AI ready. Say anything.\n\nType *menu* to go back.`,
+    sendLink: `⬇️ Send the video link.\n\nType *menu* to cancel.`,
+    chooseFmt:
+`Choose format:
+1️⃣ Video (MP4)
+2️⃣ Audio (MP3)
+
+Reply 1–2 or *menu*.`,
     downloading: '⏬ Download started…',
-    busy: '⏳ Process running.',
-    fail: '❌ Failed.'
+    busy: '⏳ A process is running.',
+    fail: '❌ Failed.',
+    done: '✅ Done.\n\nType *menu*.'
   }
 }
 
@@ -70,57 +94,12 @@ async function aiReply(text) {
       const r = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
         { model, messages: [{ role: 'user', content: text }], temperature: 0.7 },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 15000
-        }
+        { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 15000 }
       )
       return r.data.choices[0].message.content
     } catch {}
   }
   return '⚠️ AI sedang bermasalah.'
-}
-
-// ================= UI (LIST MESSAGE) =================
-function mainMenu(lang) {
-  return {
-    text: TXT[lang].hi,
-    footer: BOT_NAME,
-    title: 'Menu Utama',
-    buttonText: '📋 Buka Menu',
-    sections: [
-      {
-        title: 'Fitur',
-        rows: [
-          { title: TXT[lang].ai, rowId: 'MENU_AI' },
-          { title: TXT[lang].dl, rowId: 'MENU_DL' },
-          { title: TXT[lang].tools, rowId: 'MENU_TOOLS' }
-        ]
-      }
-    ]
-  }
-}
-
-function downloadMenu() {
-  return {
-    text: 'Pilih format download:',
-    footer: BOT_NAME,
-    title: 'Downloader',
-    buttonText: 'Pilih',
-    sections: [
-      {
-        title: 'Format',
-        rows: [
-          { title: '🎥 Video', rowId: 'DL_VIDEO' },
-          { title: '🎵 Audio (MP3)', rowId: 'DL_AUDIO' },
-          { title: '🏠 Menu Utama', rowId: 'BACK_MENU' }
-        ]
-      }
-    ]
-  }
 }
 
 // ================= BOT =================
@@ -138,15 +117,15 @@ async function startBot() {
 
   sock.ev.on('connection.update', u => {
     if (u.connection === 'open') console.log(`✅ ${BOT_NAME} connected`)
-    if (
-      u.connection === 'close' &&
-      u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
-    ) startBot()
+    if (u.connection === 'close' &&
+        u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+      startBot()
+    }
   })
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0]
-    if (!msg.message || msg.key.fromMe) return
+    if (!msg?.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
     const sender = jidNormalizedUser(msg.key.participant || chatId)
@@ -155,77 +134,86 @@ async function startBot() {
       msg.message.conversation ||
       msg.message.extendedTextMessage?.text ||
       ''
+    const t = text.trim().toLowerCase()
 
-    // INIT SESSION
+    // INIT
     if (!session.has(sender)) {
       const lang = detectLang(text)
       session.set(sender, { lang, mode: null })
-      await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
+      await sock.sendMessage(chatId, { text: TXT[lang].menu() })
       return
     }
 
     const s = session.get(sender)
     const lang = s.lang
 
-    const rowId =
-      msg.message.listResponseMessage?.singleSelectReply?.selectedRowId
-
-    // ===== MENU HANDLER =====
-    if (rowId === 'MENU_AI') {
-      s.mode = 'AI'
-      await sock.sendMessage(
-        chatId,
-        { text: '💬 AI siap. Tulis apa saja.\n\n🏠 Menu akan selalu tersedia.' },
-        { quoted: msg }
-      )
-      await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
-      return
-    }
-
-    if (rowId === 'MENU_DL') {
-      s.mode = 'DL'
-      await sock.sendMessage(
-        chatId,
-        { text: TXT[lang].sendLink },
-        { quoted: msg }
-      )
-      await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
-      return
-    }
-
-    if (rowId === 'MENU_TOOLS' || rowId === 'BACK_MENU') {
+    // GLOBAL: menu
+    if (t === 'menu') {
       s.mode = null
-      await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
+      pendingLink.delete(sender)
+      await sock.sendMessage(chatId, { text: TXT[lang].menu() })
       return
     }
 
-    // ===== LINK =====
-    if (
-      s.mode === 'DL' &&
-      /https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)
-    ) {
-      pendingLink.set(sender, text)
-      await sock.sendMessage(chatId, downloadMenu(), { quoted: msg })
+    // MODE: NONE (MENU)
+    if (!s.mode) {
+      if (t === '1') {
+        s.mode = 'AI'
+        await sock.sendMessage(chatId, { text: TXT[lang].aiReady })
+        return
+      }
+      if (t === '2') {
+        s.mode = 'DL'
+        await sock.sendMessage(chatId, { text: TXT[lang].sendLink })
+        return
+      }
+      if (t === '3') {
+        await sock.sendMessage(chatId, { text: '🧰 Tools: coming soon.\n\nType *menu*.' })
+        return
+      }
+      await sock.sendMessage(chatId, { text: TXT[lang].menu() })
       return
     }
 
-    // ===== DOWNLOAD =====
-    if (rowId === 'DL_VIDEO' || rowId === 'DL_AUDIO') {
-      const url = pendingLink.get(sender)
-      if (!url) return
+    // MODE: AI
+    if (s.mode === 'AI') {
+      const reply = await aiReply(text)
+      await sock.sendMessage(chatId, { text: `${reply}\n\n—\n${TXT[lang].done}` })
+      return
+    }
 
+    // MODE: DL (WAIT LINK)
+    if (s.mode === 'DL' && !pendingLink.has(sender)) {
+      if (/https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)) {
+        pendingLink.set(sender, text)
+        await sock.sendMessage(chatId, { text: TXT[lang].chooseFmt })
+        return
+      }
+      await sock.sendMessage(chatId, { text: TXT[lang].sendLink })
+      return
+    }
+
+    // MODE: DL (FORMAT)
+    if (s.mode === 'DL' && pendingLink.has(sender)) {
+      if (t !== '1' && t !== '2') {
+        await sock.sendMessage(chatId, { text: TXT[lang].chooseFmt })
+        return
+      }
       if (activeDownloads.has(sender)) {
-        await sock.sendMessage(chatId, { text: TXT[lang].busy }, { quoted: msg })
+        await sock.sendMessage(chatId, { text: TXT[lang].busy })
         return
       }
 
       activeDownloads.add(sender)
-      await sock.sendMessage(chatId, { text: TXT[lang].downloading }, { quoted: msg })
+      await sock.sendMessage(chatId, { text: TXT[lang].downloading })
+
+      const url = pendingLink.get(sender)
+      pendingLink.delete(sender)
 
       const id = Date.now()
       const out = `${DOWNLOAD_DIR}/${id}.%(ext)s`
       const args =
-        rowId === 'DL_AUDIO'
+        t === '2'
           ? ['-x', '--audio-format', 'mp3', '-o', out, url]
           : ['-f', 'mp4', '-o', out, url]
 
@@ -234,8 +222,9 @@ async function startBot() {
       p.on('close', async code => {
         activeDownloads.delete(sender)
         if (code !== 0) {
-          await sock.sendMessage(chatId, { text: TXT[lang].fail }, { quoted: msg })
-          await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
+          await sock.sendMessage(chatId, { text: TXT[lang].fail })
+          await sock.sendMessage(chatId, { text: TXT[lang].menu() })
+          s.mode = null
           return
         }
 
@@ -243,36 +232,17 @@ async function startBot() {
           .map(f => path.join(DOWNLOAD_DIR, f))
           .find(f => f.includes(id))
 
-        if (rowId === 'DL_AUDIO') {
-          await sock.sendMessage(
-            chatId,
-            { audio: { url: file }, mimetype: 'audio/mpeg' },
-            { quoted: msg }
-          )
+        if (t === '2') {
+          await sock.sendMessage(chatId, { audio: { url: file }, mimetype: 'audio/mpeg' })
         } else {
-          await sock.sendMessage(
-            chatId,
-            { video: { url: file } },
-            { quoted: msg }
-          )
+          await sock.sendMessage(chatId, { video: { url: file } })
         }
-
         await fs.remove(file)
-        await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
+        s.mode = null
+        await sock.sendMessage(chatId, { text: TXT[lang].menu() })
       })
       return
     }
-
-    // ===== AI CHAT =====
-    if (s.mode === 'AI') {
-      const reply = await aiReply(text)
-      await sock.sendMessage(chatId, { text: reply }, { quoted: msg })
-      await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
-      return
-    }
-
-    // FALLBACK
-    await sock.sendMessage(chatId, mainMenu(lang), { quoted: msg })
   })
 }
 
