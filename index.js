@@ -17,96 +17,56 @@ const BOT_NAME = 'WhatsappBotGro'
 const DOWNLOAD_DIR = './downloads'
 fs.ensureDirSync(DOWNLOAD_DIR)
 
-// ================= STATE =================
 const session = new Map()
-const pendingLink = new Map()
 const activeDownload = new Set()
 
-// ================= SAFE TEXT PARSER =================
-function getText(msg) {
-  try {
-    const m = msg.message
-    if (!m) return ''
-
-    if (m.conversation) return m.conversation
-    if (m.extendedTextMessage?.text) return m.extendedTextMessage.text
-
-    if (m.buttonsResponseMessage?.selectedButtonId)
-      return m.buttonsResponseMessage.selectedButtonId
-
-    const native =
-      m.interactiveResponseMessage?.nativeFlowResponseMessage
-    if (native?.paramsJson) {
-      const parsed = JSON.parse(native.paramsJson)
-      return parsed?.id || ''
-    }
-
-    return ''
-  } catch {
-    return ''
-  }
-}
-
 // ================= UTILS =================
+const getText = m =>
+  m.message?.conversation ||
+  m.message?.extendedTextMessage?.text ||
+  m.message?.imageMessage?.caption ||
+  m.message?.videoMessage?.caption ||
+  ''
+
 const detectLang = t =>
   /(gue|lu|kok|udah|bang|woy)/i.test(t) ? 'id' : 'en'
 
-// ================= BUTTON BUILDERS =================
-const menuButtons = lang => ({
-  viewOnceMessage: {
-    message: {
-      interactiveMessage: {
-        header: { title: `👋 ${BOT_NAME}` },
-        body: {
-          text:
-            lang === 'id'
-              ? 'Pilih menu di bawah'
-              : 'Choose a menu below'
-        },
-        footer: { text: BOT_NAME },
-        nativeFlowMessage: {
-          buttons: [
-            {
-              name: 'quick_reply',
-              buttonParamsJson: JSON.stringify({
-                display_text: '🤖 AI Chat',
-                id: 'AI'
-              })
-            },
-            {
-              name: 'quick_reply',
-              buttonParamsJson: JSON.stringify({
-                display_text: '⬇️ Downloader',
-                id: 'DL'
-              })
-            }
-          ]
-        }
-      }
-    }
-  }
-})
+const TXT = {
+  id: {
+    menu:
+`👋 *${BOT_NAME}*
 
-const backButton = () => ({
-  viewOnceMessage: {
-    message: {
-      interactiveMessage: {
-        body: { text: '⬅️ Back to menu' },
-        nativeFlowMessage: {
-          buttons: [
-            {
-              name: 'quick_reply',
-              buttonParamsJson: JSON.stringify({
-                display_text: '📋 Menu',
-                id: 'MENU'
-              })
-            }
-          ]
-        }
-      }
-    }
+1️⃣ AI Chat
+2️⃣ Downloader
+3️⃣ Tools (soon)
+
+Balas:
+- 1 / ai
+- 2 / download
+- menu`,
+    ai: '🤖 AI siap. Kirim pesan apa aja.\n\nKetik *menu* untuk kembali.',
+    askLink: '⬇️ Kirim link video (YT / IG / TikTok).',
+    downloading: '⏬ Download dimulai...',
+    done: '✅ Selesai.\n\nKetik *menu* untuk kembali.'
+  },
+  en: {
+    menu:
+`👋 *${BOT_NAME}*
+
+1️⃣ AI Chat
+2️⃣ Downloader
+3️⃣ Tools (soon)
+
+Reply:
+- 1 / ai
+- 2 / download
+- menu`,
+    ai: '🤖 AI ready.\n\nType *menu* to return.',
+    askLink: '⬇️ Send video link.',
+    downloading: '⏬ Downloading...',
+    done: '✅ Done.\n\nType *menu* to return.'
   }
-})
+}
 
 // ================= AI =================
 async function aiReply(text) {
@@ -143,69 +103,62 @@ async function start() {
       console.log(`✅ ${BOT_NAME} connected`)
     if (
       u.connection === 'close' &&
-      u.lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut
-    ) {
-      start()
-    }
+      u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+    ) start()
   })
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0]
-    if (!msg || !msg.message || msg.key.fromMe) return
+    if (!msg?.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
     const isGroup = chatId.endsWith('@g.us')
     const sender = jidNormalizedUser(msg.key.participant || chatId)
-    const text = getText(msg)
+    const text = getText(msg).trim()
+    const lower = text.toLowerCase()
     const key = isGroup ? `${chatId}:${sender}` : sender
 
-    // GROUP ENTRY FILTER
+    // GROUP FILTER
     if (isGroup && !session.has(key)) {
       const mentioned =
         msg.message.extendedTextMessage?.contextInfo?.mentionedJid || []
       if (!mentioned.includes(sock.user.id)) return
     }
 
-    // INIT SESSION
     if (!session.has(key)) {
       const lang = detectLang(text)
       session.set(key, { lang, mode: null })
-      await sock.sendMessage(chatId, menuButtons(lang))
+      await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
     const s = session.get(key)
+    const lang = s.lang
 
-    // MENU
-    if (text === 'MENU') {
+    if (lower === 'menu') {
       s.mode = null
-      await sock.sendMessage(chatId, menuButtons(s.lang))
+      await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    // AI MODE
-    if (text === 'AI') {
-      s.mode = 'AI'
-      await sock.sendMessage(chatId, { text: '🤖 AI ready. Say anything.' })
-      await sock.sendMessage(chatId, backButton())
+    if (!s.mode) {
+      if (['1', 'ai'].includes(lower)) {
+        s.mode = 'AI'
+        await sock.sendMessage(chatId, { text: TXT[lang].ai })
+        return
+      }
+      if (['2', 'download'].includes(lower)) {
+        s.mode = 'DL'
+        await sock.sendMessage(chatId, { text: TXT[lang].askLink })
+        return
+      }
+      await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
     if (s.mode === 'AI') {
       const r = await aiReply(text)
       await sock.sendMessage(chatId, { text: r })
-      await sock.sendMessage(chatId, backButton())
-      return
-    }
-
-    // DL MODE
-    if (text === 'DL') {
-      s.mode = 'DL'
-      await sock.sendMessage(chatId, {
-        text: '⬇️ Send video link (YT / IG / TikTok)'
-      })
-      await sock.sendMessage(chatId, backButton())
       return
     }
 
@@ -213,14 +166,12 @@ async function start() {
       if (activeDownload.has(key)) return
       activeDownload.add(key)
 
-      await sock.sendMessage(chatId, { text: '⏬ Downloading...' })
+      await sock.sendMessage(chatId, { text: TXT[lang].downloading })
 
-      spawn('yt-dlp', ['-f', 'mp4', text]).on('close', () => {
+      spawn('yt-dlp', ['-f', 'mp4', text]).on('close', async () => {
         activeDownload.delete(key)
-        sock.sendMessage(chatId, {
-          text: '✅ Done (saved on server)'
-        })
-        sock.sendMessage(chatId, menuButtons(s.lang))
+        s.mode = null
+        await sock.sendMessage(chatId, { text: TXT[lang].done })
       })
     }
   })
