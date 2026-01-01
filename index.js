@@ -16,7 +16,7 @@ const fs = require('fs-extra')
 const readline = require('readline')
 const { exec } = require('child_process')
 const path = require('path')
-
+require('dotenv').config()
 const PREFIX = '!'
 const BOT_NAME = 'WA-BOT'
 const DOWNLOAD_DIR = './downloads'
