@@ -17,7 +17,7 @@ const { spawn } = require('child_process')
 // ================= CONFIG =================
 const BOT_NAME = 'WhatsappBotGro'
 const DOWNLOAD_DIR = './downloads'
-const GROQ_MODELS = [
+const MODELS = [
   'llama-3.1-8b-instant',
   'mixtral-8x7b-32768',
   'llama-3.1-70b-versatile'
@@ -29,16 +29,20 @@ const session = new Map()
 const pendingLink = new Map()
 const activeDownloads = new Set()
 
-// ================= LANGUAGE =================
-function detectLang(t = '') {
-  t = t.toLowerCase()
-  if (/(gua|lu|kok|nggak|udah|woy|bang)/.test(t)) return 'id'
-  return 'en'
-}
+// ================= UTILS =================
+const getText = msg =>
+  msg.message?.conversation ||
+  msg.message?.extendedTextMessage?.text ||
+  msg.message?.imageMessage?.caption ||
+  msg.message?.videoMessage?.caption ||
+  ''
+
+const detectLang = t =>
+  /(gua|lu|kok|udah|nggak|bang|woy)/i.test(t) ? 'id' : 'en'
 
 const TXT = {
   id: {
-    menu: () =>
+    menu:
 `👋 Halo, gue ${BOT_NAME}
 
 1️⃣ AI Chat
@@ -46,77 +50,56 @@ const TXT = {
 3️⃣ Tools (coming soon)
 
 Balas angka (1–3).
-Ketik *menu* kapan saja.`,
-    aiReady: `🤖 AI siap. Tulis apa aja.\n\nKetik *menu* buat balik.`,
-    sendLink: `⬇️ Kirim link videonya.\n\nKetik *menu* buat batal.`,
-    chooseFmt:
+Ketik *menu* kapan aja.`,
+    ai: '🤖 AI siap. Kirim pesan.\n\nKetik *menu* buat balik.',
+    link: '⬇️ Kirim link videonya.',
+    format:
 `Pilih format:
 1️⃣ Video (MP4)
-2️⃣ Audio (MP3)
-
-Balas angka (1–2) atau *menu*.`,
+2️⃣ Audio (MP3)`,
     downloading: '⏬ Download dimulai…',
     busy: '⏳ Masih ada proses berjalan.',
-    fail: '❌ Gagal memproses.',
+    fail: '❌ Gagal.'
   },
   en: {
-    menu: () =>
+    menu:
 `👋 Hi, I'm ${BOT_NAME}
 
 1️⃣ AI Chat
 2️⃣ Downloader (YT / TikTok / IG)
 3️⃣ Tools (coming soon)
 
-Reply with a number (1–3).
+Reply 1–3.
 Type *menu* anytime.`,
-    aiReady: `🤖 AI ready. Say anything.\n\nType *menu* to go back.`,
-    sendLink: `⬇️ Send the video link.\n\nType *menu* to cancel.`,
-    chooseFmt:
+    ai: '🤖 AI ready.',
+    link: '⬇️ Send the video link.',
+    format:
 `Choose format:
 1️⃣ Video (MP4)
-2️⃣ Audio (MP3)
-
-Reply 1–2 or *menu*.`,
+2️⃣ Audio (MP3)`,
     downloading: '⏬ Download started…',
-    busy: '⏳ A process is running.',
-    fail: '❌ Failed.',
+    busy: '⏳ Process running.',
+    fail: '❌ Failed.'
   }
 }
 
 // ================= AI =================
 async function aiReply(text) {
-  for (const model of GROQ_MODELS) {
+  for (const model of MODELS) {
     try {
       const r = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
         { model, messages: [{ role: 'user', content: text }] },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 15000
-        }
+        { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` } }
       )
       return r.data.choices[0].message.content
     } catch {}
   }
-  return '⚠️ AI error.'
-}
-
-// ================= SAFE TEXT PARSER =================
-function getText(msg) {
-  return (
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption ||
-    ''
-  ).trim()
+  return 'AI error.'
 }
 
 // ================= BOT =================
-async function startBot() {
+async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./session')
   const { version } = await fetchLatestBaileysVersion()
 
@@ -129,15 +112,12 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', u => {
-    if (u.connection === 'open') {
+    if (u.connection === 'open')
       console.log(`✅ ${BOT_NAME} connected`)
-    }
     if (
       u.connection === 'close' &&
       u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
-    ) {
-      startBot()
-    }
+    ) start()
   })
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -145,133 +125,105 @@ async function startBot() {
     if (!msg?.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
-    const sender = jidNormalizedUser(msg.key.participant || chatId)
     const isGroup = chatId.endsWith('@g.us')
-
-    const text = getText(msg)
-    const t = text.toLowerCase()
+    const sender = jidNormalizedUser(msg.key.participant || chatId)
+    const text = getText(msg).trim()
+    const lower = text.toLowerCase()
 
     // ===== GROUP FILTER =====
     if (isGroup) {
       const mentioned =
         msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
-      const called =
-        mentioned.includes(sock.user.id) || /^menu|^bot|^ai/.test(t)
-      if (!called) return
+      const repliedBot =
+        msg.message?.extendedTextMessage?.contextInfo?.participant === sock.user.id
+
+      if (
+        !mentioned.includes(sock.user.id) &&
+        !repliedBot &&
+        !/^menu|^[123]$/.test(lower)
+      ) return
     }
 
-    // ===== INIT =====
-    if (!session.has(sender)) {
+    // ===== SESSION KEY =====
+    const sessionKey = isGroup ? `${chatId}:${sender}` : sender
+
+    if (!session.has(sessionKey)) {
       const lang = detectLang(text)
-      session.set(sender, { lang, mode: null })
-      await sock.sendMessage(chatId, { text: TXT[lang].menu() })
+      session.set(sessionKey, { lang, mode: null })
+      await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    const s = session.get(sender)
+    const s = session.get(sessionKey)
     const lang = s.lang
 
-    // ===== GLOBAL MENU =====
-    if (t === 'menu') {
+    if (lower === 'menu') {
       s.mode = null
-      pendingLink.delete(sender)
-      await sock.sendMessage(chatId, { text: TXT[lang].menu() })
+      pendingLink.delete(sessionKey)
+      await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
     // ===== MAIN MENU =====
     if (!s.mode) {
-      if (t === '1') {
+      if (lower === '1') {
         s.mode = 'AI'
-        await sock.sendMessage(chatId, { text: TXT[lang].aiReady })
+        await sock.sendMessage(chatId, { text: TXT[lang].ai })
         return
       }
-      if (t === '2') {
+      if (lower === '2') {
         s.mode = 'DL'
-        await sock.sendMessage(chatId, { text: TXT[lang].sendLink })
+        await sock.sendMessage(chatId, { text: TXT[lang].link })
         return
       }
-      if (t === '3') {
-        await sock.sendMessage(chatId, { text: '🧰 Tools coming soon.\n\nType *menu*.' })
-        return
-      }
-      await sock.sendMessage(chatId, { text: TXT[lang].menu() })
+      await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    // ===== AI MODE =====
+    // ===== AI =====
     if (s.mode === 'AI') {
       const reply = await aiReply(text)
-      await sock.sendMessage(chatId, { text: reply + '\n\n—\nType *menu*.' })
+      await sock.sendMessage(chatId, {
+        text: reply + '\n\n—\nType *menu*'
+      })
       return
     }
 
-    // ===== DL LINK =====
-    if (s.mode === 'DL' && !pendingLink.has(sender)) {
-      if (/https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)) {
-        pendingLink.set(sender, text)
-        await sock.sendMessage(chatId, { text: TXT[lang].chooseFmt })
-        return
+    // ===== DL =====
+    if (s.mode === 'DL' && !pendingLink.has(sessionKey)) {
+      if (/https?:\/\//i.test(text)) {
+        pendingLink.set(sessionKey, text)
+        await sock.sendMessage(chatId, { text: TXT[lang].format })
       }
-      await sock.sendMessage(chatId, { text: TXT[lang].sendLink })
       return
     }
 
-    // ===== DL FORMAT =====
-    if (s.mode === 'DL' && pendingLink.has(sender)) {
-      if (!['1', '2'].includes(t)) {
-        await sock.sendMessage(chatId, { text: TXT[lang].chooseFmt })
-        return
-      }
-
-      if (activeDownloads.has(sender)) {
+    if (s.mode === 'DL' && pendingLink.has(sessionKey)) {
+      if (!['1', '2'].includes(lower)) return
+      if (activeDownloads.has(sessionKey)) {
         await sock.sendMessage(chatId, { text: TXT[lang].busy })
         return
       }
 
-      activeDownloads.add(sender)
+      activeDownloads.add(sessionKey)
       await sock.sendMessage(chatId, { text: TXT[lang].downloading })
 
-      const url = pendingLink.get(sender)
-      pendingLink.delete(sender)
+      const url = pendingLink.get(sessionKey)
+      pendingLink.delete(sessionKey)
 
-      const id = Date.now()
-      const out = `${DOWNLOAD_DIR}/${id}.%(ext)s`
+      const out = `${DOWNLOAD_DIR}/${Date.now()}.%(ext)s`
       const args =
-        t === '2'
+        lower === '2'
           ? ['-x', '--audio-format', 'mp3', '-o', out, url]
           : ['-f', 'mp4', '-o', out, url]
 
-      const p = spawn('yt-dlp', args)
-
-      p.on('close', async code => {
-        activeDownloads.delete(sender)
+      spawn('yt-dlp', args).on('close', async () => {
+        activeDownloads.delete(sessionKey)
         s.mode = null
-
-        if (code !== 0) {
-          await sock.sendMessage(chatId, { text: TXT[lang].fail })
-          await sock.sendMessage(chatId, { text: TXT[lang].menu() })
-          return
-        }
-
-        const file = (await fs.readdir(DOWNLOAD_DIR))
-          .map(f => path.join(DOWNLOAD_DIR, f))
-          .find(f => f.includes(id))
-
-        if (t === '2') {
-          await sock.sendMessage(chatId, {
-            audio: { url: file },
-            mimetype: 'audio/mpeg'
-          })
-        } else {
-          await sock.sendMessage(chatId, { video: { url: file } })
-        }
-
-        await fs.remove(file)
-        await sock.sendMessage(chatId, { text: TXT[lang].menu() })
+        await sock.sendMessage(chatId, { text: TXT[lang].menu })
       })
     }
   })
 }
 
-startBot()
+start()
