@@ -1,136 +1,158 @@
-const { Boom } = require('@hapi/boom');
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, delay } = require('@whiskeysockets/baileys');
-const pino = require('pino');
-const qrTerminal = require('qrcode-terminal'); // Tambah ini buat print QR manual pasti jalan
-const fs = require('fs');
-const path = require('path');
-const { Low } = require('lowdb');
-const { JSONFile } = require('lowdb/node');
-const OpenAI = require('openai');
-const winston = require('winston');
-const i18n = require('i18n');
-const schedule = require('node-schedule');
-const express = require('express');
-const CryptoJS = require('crypto-js');
-const Stripe = require('stripe');
+/**
+ * WhatsApp Bot – Production Ready (JS Only)
+ * Compatible: Termux / VPS / Laptop
+ */
 
-// === CONFIG API KEYS ===
-const openai = new OpenAI({ apiKey: 'sk-your-openai-key-here' });
-const stripe = Stripe('sk_test_your_stripe_test_key');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys')
 
-// === DATABASE LOWDB OTOMATIS ===
-const dbAdapter = new JSONFile('db.json');
-const db = new Low(dbAdapter, { users: {}, logs: [] });
+const Pino = require('pino')
+const qrcode = require('qrcode-terminal')
+const axios = require('axios')
+const fs = require('fs-extra')
+const path = require('path')
 
-// === I18N & LOGGER ===
-i18n.configure({
-    locales: ['id', 'en'],
-    directory: __dirname + '/locales',
-    defaultLocale: 'id'
-});
+const PREFIX = '!'
+const BOT_NAME = 'WA-BOT'
 
-const logger = winston.createLogger({
-    transports: [new winston.transports.File({ filename: 'logs.enc' })]
-});
+// ================= UTIL =================
+const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-// === FOLDER & DASHBOARD ===
-if (!fs.existsSync('./downloads')) fs.mkdirSync('./downloads');
-const app = express();
-app.get('/analytics', async (req, res) => {
-    await db.read();
-    res.json({ users: Object.values(db.data.users), total_logs: db.data.logs.length });
-});
-app.listen(3000, () => console.log('Dashboard ready di http://localhost:3000/analytics'));
-
-// === HELPER FUNCTIONS ===
-async function randomDelay(min = 2000, max = 22000) {
-    await delay(Math.floor(Math.random() * (max - min + 1)) + min);
+function isCommand(text) {
+  return text.startsWith(PREFIX)
 }
 
-async function sendWithHumanBehavior(sock, jid, msg) {
-    await sock.presenceSubscribe(jid);
-    await randomDelay(3000, 14000);
-    const actions = ['composing', 'recording', 'paused', 'available'];
-    const thinkingMsgs = ['Bentar ya bro, lagi mikir nih 🤔', 'Hmm oke, sabar sebentar!', 'Wih menarik, lagi proses dulu ya 😏', ''];
-    const randomThink = thinkingMsgs[Math.floor(Math.random() * thinkingMsgs.length)];
-    if (randomThink) await sock.sendMessage(jid, { text: randomThink });
-    for (let i = 0; i < Math.floor(Math.random() * 5) + 1; i++) {
-        await sock.sendPresenceUpdate(actions[Math.floor(Math.random() * actions.length)], jid);
-        await randomDelay(4000, 12000);
+function getText(msg) {
+  return (
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    ''
+  )
+}
+
+// ================= AI =================
+async function aiReply(prompt) {
+  const apiKey = process.env.AI_API_KEY
+  if (!apiKey) return 'AI belum dikonfigurasi.'
+
+  const res = await axios.post(
+    'https://api.openai.com/v1/chat/completions',
+    {
+      model: 'gpt-3.5-turbo',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      }
     }
-    await sock.sendMessage(jid, msg);
-    await sock.sendPresenceUpdate(Math.random() > 0.4 ? 'paused' : 'available', jid);
+  )
+
+  return res.data.choices[0].message.content
 }
 
-async function saveUser(jid, updates = {}) {
-    await db.read();
-    db.data.users[jid] ||= { interactions: 0, downloads: 0, broadcasts: 0, lang: 'id', game_state: {}, reminders: [], custom_keywords: {} };
-    Object.assign(db.data.users[jid], updates);
-    db.data.users[jid].interactions = (db.data.users[jid].interactions || 0) + 1;
-    await db.write();
-}
-
-function logAction(jid, action) {
-    db.read().then(async () => {
-        db.data.logs.push(CryptoJS.AES.encrypt(JSON.stringify({ jid, action, time: new Date() }), 'secret123').toString());
-        await db.write();
-    });
-}
-
-// === INIT DB & START BOT ===
+// ================= MAIN =================
 async function startBot() {
-    await db.read();
-    await db.write();
-    console.log('Database db.json ready otomatis! Bot launching with max human-like vibes 🔥');
+  const { state, saveCreds } = await useMultiFileAuthState('./session')
+  const { version } = await fetchLatestBaileysVersion()
 
-    const browsers = [
-        ['Chrome (Linux)', '', '120.0'],
-        ['Safari (iOS)', '', '17.0'],
-        ['Firefox (Android)', '', '115.0'],
-        ['Edge (Windows)', '', '120.0'],
-        ['Opera (MacOS)', '', '100.0'],
-        ['Brave (Linux)', '', '1.60']
-    ];
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: Pino({ level: 'silent' }),
+    printQRInTerminal: true
+  })
 
-    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-    const sock = makeWASocket({
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false, // Kita handle manual biar pasti jalan
-        auth: state,
-        browser: browsers[Math.floor(Math.random() * browsers.length)],
-        markOnlineOnConnect: Math.random() > 0.3
-    });
+  sock.ev.on('creds.update', saveCreds)
 
-    // Handle QR manual pakai qrcode-terminal (pasti muncul kalau perlu)
-    sock.ev.on('connection.update', (update) => {
-        const { qr, connection, lastDisconnect } = update;
-        if (qr) {
-            console.log('Scan QR ini cepat di WhatsApp:');
-            qrTerminal.generate(qr, { small: true }); // Print QR terminal pasti
-        }
-        if (connection === 'close') {
-            const errorCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-            console.log(`Koneksi putus (code: ${errorCode}), auto reconnect...`);
-            if (errorCode !== DisconnectReason.loggedOut) startBot(); // Reconnect kalau bukan logged out
-            else console.log('Logged out, hapus auth_info dan scan ulang!');
-        } else if (connection === 'open') {
-            console.log('Bot connected full power! Human-like mode on, susah detect 🔥');
-        }
-    });
+  // ===== CONNECTION =====
+  sock.ev.on('connection.update', update => {
+    const { connection, lastDisconnect, qr } = update
 
-    sock.ev.on('creds.update', saveCreds);
+    if (qr) qrcode.generate(qr, { small: true })
 
-    // Call handling dan messages upsert tetep sama seperti sebelumnya...
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode
+      if (code !== DisconnectReason.loggedOut) {
+        console.log('Reconnect...')
+        startBot()
+      } else {
+        console.log('Session logout.')
+      }
+    }
 
-    // (Paste bagian call dan messages.upsert dari kode sebelumnya di sini biar lengkap)
+    if (connection === 'open') {
+      console.log(`✅ ${BOT_NAME} connected`)
+    }
+  })
 
-    sock.ev.on('call', async calls => {
-        // Sama seperti sebelumnya
-    });
+  // ===== MESSAGE HANDLER =====
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const msg = messages[0]
+    if (!msg.message || msg.key.fromMe) return
 
-    sock.ev.on('messages.upsert', async m => {
-        // Sama seperti sebelumnya, handler menu, sticker, generate, default reply
-    });
+    const chatId = msg.key.remoteJid
+    const text = getText(msg).trim()
+    if (!text) return
+
+    // typing indicator
+    await sock.sendPresenceUpdate('composing', chatId)
+
+    // AUTO REPLY
+    if (/^(halo|hai|hello)$/i.test(text)) {
+      await sock.sendMessage(chatId, { text: `Halo 👋 gue ${BOT_NAME}` })
+      return
+    }
+
+    // COMMAND
+    if (isCommand(text)) {
+      const [cmd, ...args] = text.slice(1).split(' ')
+      const command = cmd.toLowerCase()
+
+      switch (command) {
+        case 'ping':
+          await sock.sendMessage(chatId, { text: 'pong 🏓' })
+          break
+
+        case 'menu':
+          await sock.sendMessage(chatId, {
+            text: `
+📜 *MENU*
+!ping
+!menu
+!ai <teks>
+`
+          })
+          break
+
+        case 'ai':
+          if (!args.length) {
+            await sock.sendMessage(chatId, {
+              text: 'Contoh: !ai jelaskan python'
+            })
+            break
+          }
+          const reply = await aiReply(args.join(' '))
+          await sock.sendMessage(chatId, { text: reply })
+          break
+
+        default:
+          await sock.sendMessage(chatId, { text: 'Command tidak dikenal ❌' })
+      }
+      return
+    }
+
+    // DEFAULT AI CHAT
+    const reply = await aiReply(text)
+    await sock.sendMessage(chatId, { text: reply })
+  })
 }
 
-startBot().catch(err => console.error('Error fatal:', err));
+// ================= RUN =================
+startBot().catch(console.error)
