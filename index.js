@@ -25,9 +25,9 @@ const GROQ_MODELS = [
 fs.ensureDirSync(DOWNLOAD_DIR)
 
 // ================= STATE =================
-const session = new Map() // sender -> { lang, mode }
-const pendingLink = new Map()
-const activeDownloads = new Set()
+const session = new Map()          // sender -> { lang, mode }
+const pendingLink = new Map()      // sender -> url
+const activeDownloads = new Set()  // sender
 
 // ================= LANGUAGE =================
 function detectLang(t = '') {
@@ -94,7 +94,13 @@ async function aiReply(text) {
       const r = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
         { model, messages: [{ role: 'user', content: text }], temperature: 0.7 },
-        { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15000
+        }
       )
       return r.data.choices[0].message.content
     } catch {}
@@ -116,9 +122,13 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', u => {
-    if (u.connection === 'open') console.log(`✅ ${BOT_NAME} connected`)
-    if (u.connection === 'close' &&
-        u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+    if (u.connection === 'open') {
+      console.log(`✅ ${BOT_NAME} connected`)
+    }
+    if (
+      u.connection === 'close' &&
+      u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+    ) {
       startBot()
     }
   })
@@ -129,6 +139,7 @@ async function startBot() {
 
     const chatId = msg.key.remoteJid
     const sender = jidNormalizedUser(msg.key.participant || chatId)
+    const isGroup = chatId.endsWith('@g.us')
 
     const text =
       msg.message.conversation ||
@@ -136,7 +147,17 @@ async function startBot() {
       ''
     const t = text.trim().toLowerCase()
 
-    // INIT
+    // ===== GROUP FILTER (ANTI SPAM) =====
+    if (isGroup) {
+      const mentioned =
+        msg.message.extendedTextMessage?.contextInfo?.mentionedJid || []
+      const isMentioned = mentioned.includes(sock.user.id)
+      const isCalled = /^bot|^ai|^menu/i.test(t)
+
+      if (!isMentioned && !isCalled) return
+    }
+
+    // ===== INIT SESSION =====
     if (!session.has(sender)) {
       const lang = detectLang(text)
       session.set(sender, { lang, mode: null })
@@ -147,7 +168,7 @@ async function startBot() {
     const s = session.get(sender)
     const lang = s.lang
 
-    // GLOBAL: menu
+    // ===== GLOBAL MENU =====
     if (t === 'menu') {
       s.mode = null
       pendingLink.delete(sender)
@@ -155,7 +176,7 @@ async function startBot() {
       return
     }
 
-    // MODE: NONE (MENU)
+    // ===== MENU MODE =====
     if (!s.mode) {
       if (t === '1') {
         s.mode = 'AI'
@@ -175,14 +196,14 @@ async function startBot() {
       return
     }
 
-    // MODE: AI
+    // ===== AI MODE =====
     if (s.mode === 'AI') {
       const reply = await aiReply(text)
       await sock.sendMessage(chatId, { text: `${reply}\n\n—\n${TXT[lang].done}` })
       return
     }
 
-    // MODE: DL (WAIT LINK)
+    // ===== DL MODE (WAIT LINK) =====
     if (s.mode === 'DL' && !pendingLink.has(sender)) {
       if (/https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)) {
         pendingLink.set(sender, text)
@@ -193,12 +214,13 @@ async function startBot() {
       return
     }
 
-    // MODE: DL (FORMAT)
+    // ===== DL MODE (FORMAT) =====
     if (s.mode === 'DL' && pendingLink.has(sender)) {
       if (t !== '1' && t !== '2') {
         await sock.sendMessage(chatId, { text: TXT[lang].chooseFmt })
         return
       }
+
       if (activeDownloads.has(sender)) {
         await sock.sendMessage(chatId, { text: TXT[lang].busy })
         return
@@ -221,6 +243,7 @@ async function startBot() {
 
       p.on('close', async code => {
         activeDownloads.delete(sender)
+
         if (code !== 0) {
           await sock.sendMessage(chatId, { text: TXT[lang].fail })
           await sock.sendMessage(chatId, { text: TXT[lang].menu() })
@@ -233,15 +256,18 @@ async function startBot() {
           .find(f => f.includes(id))
 
         if (t === '2') {
-          await sock.sendMessage(chatId, { audio: { url: file }, mimetype: 'audio/mpeg' })
+          await sock.sendMessage(chatId, {
+            audio: { url: file },
+            mimetype: 'audio/mpeg'
+          })
         } else {
           await sock.sendMessage(chatId, { video: { url: file } })
         }
+
         await fs.remove(file)
         s.mode = null
         await sock.sendMessage(chatId, { text: TXT[lang].menu() })
       })
-      return
     }
   })
 }
