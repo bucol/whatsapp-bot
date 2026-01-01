@@ -16,12 +16,12 @@ const { spawn } = require('child_process')
 // ================= CONFIG =================
 const BOT_NAME = 'WhatsappBotGro'
 const DOWNLOAD_DIR = './downloads'
+fs.ensureDirSync(DOWNLOAD_DIR)
+
 const MODELS = [
   'llama-3.1-8b-instant',
   'mixtral-8x7b-32768'
 ]
-
-fs.ensureDirSync(DOWNLOAD_DIR)
 
 // ================= STATE =================
 const session = new Map()
@@ -131,8 +131,10 @@ async function start() {
     const text = getText(msg).trim()
     const lower = text.toLowerCase()
 
-    // ===== GROUP FILTER =====
-    if (isGroup) {
+    const sessionKey = isGroup ? `${chatId}:${sender}` : sender
+
+    // ===== GROUP ENTRY FILTER (ONLY IF NO SESSION YET) =====
+    if (isGroup && !session.has(sessionKey)) {
       const mentioned =
         msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
       const replied =
@@ -141,30 +143,30 @@ async function start() {
       if (
         !mentioned.includes(sock.user.id) &&
         !replied &&
-        !/^menu|^[123]$/.test(lower)
+        lower !== 'menu'
       ) return
     }
 
-    const key = isGroup ? `${chatId}:${sender}` : sender
-
-    if (!session.has(key)) {
+    // ===== INIT SESSION =====
+    if (!session.has(sessionKey)) {
       const lang = detectLang(text)
-      session.set(key, { lang, mode: null })
+      session.set(sessionKey, { lang, mode: null })
       await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    const s = session.get(key)
+    const s = session.get(sessionKey)
     const lang = s.lang
 
+    // ===== MENU RESET =====
     if (lower === 'menu') {
       s.mode = null
-      pendingLink.delete(key)
+      pendingLink.delete(sessionKey)
       await sock.sendMessage(chatId, { text: TXT[lang].menu })
       return
     }
 
-    // ===== MENU =====
+    // ===== MAIN MENU =====
     if (!s.mode) {
       if (lower === '1') {
         s.mode = 'AI'
@@ -180,37 +182,37 @@ async function start() {
       return
     }
 
-    // ===== AI =====
+    // ===== AI MODE =====
     if (s.mode === 'AI') {
       const r = await aiReply(text)
       await sock.sendMessage(chatId, { text: r + '\n\n—\nmenu' })
       return
     }
 
-    // ===== DL STEP 1 (LINK) =====
+    // ===== DL STEP 1: LINK =====
     if (s.mode === 'DL' && /https?:\/\//i.test(text)) {
-      pendingLink.set(key, text)
+      pendingLink.set(sessionKey, text)
       await sock.sendMessage(chatId, { text: TXT[lang].askFormat })
       return
     }
 
-    // ===== DL STEP 2 (FORMAT) =====
-    if (s.mode === 'DL' && pendingLink.has(key)) {
+    // ===== DL STEP 2: FORMAT =====
+    if (s.mode === 'DL' && pendingLink.has(sessionKey)) {
       if (!['1', '2'].includes(lower)) {
         await sock.sendMessage(chatId, { text: TXT[lang].invalid })
         return
       }
 
-      if (activeDownload.has(key)) {
+      if (activeDownload.has(sessionKey)) {
         await sock.sendMessage(chatId, { text: TXT[lang].busy })
         return
       }
 
-      activeDownload.add(key)
+      activeDownload.add(sessionKey)
       await sock.sendMessage(chatId, { text: TXT[lang].downloading })
 
-      const url = pendingLink.get(key)
-      pendingLink.delete(key)
+      const url = pendingLink.get(sessionKey)
+      pendingLink.delete(sessionKey)
 
       const out = `${DOWNLOAD_DIR}/${Date.now()}.%(ext)s`
       const args =
@@ -219,7 +221,7 @@ async function start() {
           : ['-f', 'mp4', '-o', out, url]
 
       spawn('yt-dlp', args).on('close', async () => {
-        activeDownload.delete(key)
+        activeDownload.delete(sessionKey)
         s.mode = null
         await sock.sendMessage(chatId, { text: TXT[lang].done })
       })
