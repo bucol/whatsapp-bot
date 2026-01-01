@@ -1,5 +1,5 @@
 /**
- * WhatsApp Bot – Groq AI (Stable, No Crash)
+ * WhatsApp Bot – Groq AI (Auto Fallback Models)
  * Termux / VPS / Laptop
  */
 
@@ -20,8 +20,12 @@ const readline = require('readline')
 const PREFIX = '!'
 const BOT_NAME = 'WA-BOT'
 
-// 🔁 GANTI MODEL DI SINI SAJA
-const GROQ_MODEL = 'llama-3.1-8b-instant'
+// 🔁 URUTAN MODEL (PRIORITAS)
+const GROQ_MODELS = [
+  'llama-3.1-8b-instant',     // cepat & hemat
+  'mixtral-8x7b-32768',       // fallback
+  'llama-3.1-70b-versatile'  // paling pintar
+]
 
 // ================= INPUT =================
 const rl = readline.createInterface({
@@ -30,33 +34,40 @@ const rl = readline.createInterface({
 })
 const ask = q => new Promise(r => rl.question(q, r))
 
-// ================= AI (GROQ) =================
+// ================= AI (GROQ + FALLBACK) =================
 async function aiReply(prompt) {
   const apiKey = process.env.GROQ_API_KEY
   if (!apiKey) return 'AI belum dikonfigurasi.'
 
-  try {
-    const res = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: GROQ_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
+  for (const model of GROQ_MODELS) {
+    try {
+      const res = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.7
         },
-        timeout: 15000
-      }
-    )
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15000
+        }
+      )
 
-    return res.data.choices[0].message.content
-  } catch (err) {
-    console.error('❌ GROQ ERROR:', err.response?.data || err.message)
-    return '⚠️ AI lagi error, coba beberapa saat lagi.'
+      console.log(`🤖 AI reply using model: ${model}`)
+      return res.data.choices[0].message.content
+    } catch (err) {
+      console.error(
+        `⚠️ Model ${model} failed:`,
+        err.response?.data?.error?.code || err.message
+      )
+    }
   }
+
+  return '⚠️ Semua model AI sedang bermasalah. Coba lagi nanti.'
 }
 
 // ================= BOT =================
@@ -87,7 +98,7 @@ async function startBot() {
 
     if (connection === 'open') {
       console.log(`✅ ${BOT_NAME} connected`)
-      console.log(`🤖 Model AI: ${GROQ_MODEL}`)
+      console.log(`🤖 AI Models: ${GROQ_MODELS.join(', ')}`)
     }
 
     if (connection === 'close') {
@@ -117,7 +128,7 @@ async function startBot() {
     await sock.sendPresenceUpdate('composing', chatId)
 
     // AUTO REPLY
-    if (/^(halo|hai|hello)$/i.test(text)) {
+    if (/^(halo|hai|hello|oi|oii+)$/i.test(text)) {
       await sock.sendMessage(chatId, {
         text: `Halo 👋 gue ${BOT_NAME}`
       })
