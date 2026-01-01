@@ -25,16 +25,14 @@ const GROQ_MODELS = [
 fs.ensureDirSync(DOWNLOAD_DIR)
 
 // ================= STATE =================
-const session = new Map()          // sender -> { lang, mode }
-const pendingLink = new Map()      // sender -> url
-const activeDownloads = new Set()  // sender
+const session = new Map()
+const pendingLink = new Map()
+const activeDownloads = new Set()
 
 // ================= LANGUAGE =================
 function detectLang(t = '') {
   t = t.toLowerCase()
-  if (/(gua|lu|bang|udah|kok|nggak|woy)/.test(t)) return 'id'
-  if (/[áéíóúñ¿¡]/.test(t)) return 'es'
-  if (/[ãõç]/.test(t)) return 'pt'
+  if (/(gua|lu|kok|nggak|udah|woy|bang)/.test(t)) return 'id'
   return 'en'
 }
 
@@ -49,8 +47,8 @@ const TXT = {
 
 Balas angka (1–3).
 Ketik *menu* kapan saja.`,
-    aiReady: `🤖 AI siap. Tulis apa saja.\n\nKetik *menu* untuk kembali.`,
-    sendLink: `⬇️ Kirim link videonya.\n\nKetik *menu* untuk batal.`,
+    aiReady: `🤖 AI siap. Tulis apa aja.\n\nKetik *menu* buat balik.`,
+    sendLink: `⬇️ Kirim link videonya.\n\nKetik *menu* buat batal.`,
     chooseFmt:
 `Pilih format:
 1️⃣ Video (MP4)
@@ -60,7 +58,6 @@ Balas angka (1–2) atau *menu*.`,
     downloading: '⏬ Download dimulai…',
     busy: '⏳ Masih ada proses berjalan.',
     fail: '❌ Gagal memproses.',
-    done: '✅ Selesai.\n\nKetik *menu*.'
   },
   en: {
     menu: () =>
@@ -83,7 +80,6 @@ Reply 1–2 or *menu*.`,
     downloading: '⏬ Download started…',
     busy: '⏳ A process is running.',
     fail: '❌ Failed.',
-    done: '✅ Done.\n\nType *menu*.'
   }
 }
 
@@ -93,7 +89,7 @@ async function aiReply(text) {
     try {
       const r = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
-        { model, messages: [{ role: 'user', content: text }], temperature: 0.7 },
+        { model, messages: [{ role: 'user', content: text }] },
         {
           headers: {
             Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
@@ -105,7 +101,18 @@ async function aiReply(text) {
       return r.data.choices[0].message.content
     } catch {}
   }
-  return '⚠️ AI sedang bermasalah.'
+  return '⚠️ AI error.'
+}
+
+// ================= SAFE TEXT PARSER =================
+function getText(msg) {
+  return (
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.videoMessage?.caption ||
+    ''
+  ).trim()
 }
 
 // ================= BOT =================
@@ -141,23 +148,19 @@ async function startBot() {
     const sender = jidNormalizedUser(msg.key.participant || chatId)
     const isGroup = chatId.endsWith('@g.us')
 
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      ''
-    const t = text.trim().toLowerCase()
+    const text = getText(msg)
+    const t = text.toLowerCase()
 
-    // ===== GROUP FILTER (ANTI SPAM) =====
+    // ===== GROUP FILTER =====
     if (isGroup) {
       const mentioned =
-        msg.message.extendedTextMessage?.contextInfo?.mentionedJid || []
-      const isMentioned = mentioned.includes(sock.user.id)
-      const isCalled = /^bot|^ai|^menu/i.test(t)
-
-      if (!isMentioned && !isCalled) return
+        msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
+      const called =
+        mentioned.includes(sock.user.id) || /^menu|^bot|^ai/.test(t)
+      if (!called) return
     }
 
-    // ===== INIT SESSION =====
+    // ===== INIT =====
     if (!session.has(sender)) {
       const lang = detectLang(text)
       session.set(sender, { lang, mode: null })
@@ -176,7 +179,7 @@ async function startBot() {
       return
     }
 
-    // ===== MENU MODE =====
+    // ===== MAIN MENU =====
     if (!s.mode) {
       if (t === '1') {
         s.mode = 'AI'
@@ -189,7 +192,7 @@ async function startBot() {
         return
       }
       if (t === '3') {
-        await sock.sendMessage(chatId, { text: '🧰 Tools: coming soon.\n\nType *menu*.' })
+        await sock.sendMessage(chatId, { text: '🧰 Tools coming soon.\n\nType *menu*.' })
         return
       }
       await sock.sendMessage(chatId, { text: TXT[lang].menu() })
@@ -199,11 +202,11 @@ async function startBot() {
     // ===== AI MODE =====
     if (s.mode === 'AI') {
       const reply = await aiReply(text)
-      await sock.sendMessage(chatId, { text: `${reply}\n\n—\n${TXT[lang].done}` })
+      await sock.sendMessage(chatId, { text: reply + '\n\n—\nType *menu*.' })
       return
     }
 
-    // ===== DL MODE (WAIT LINK) =====
+    // ===== DL LINK =====
     if (s.mode === 'DL' && !pendingLink.has(sender)) {
       if (/https?:\/\/(youtube|youtu|tiktok|instagram)/i.test(text)) {
         pendingLink.set(sender, text)
@@ -214,9 +217,9 @@ async function startBot() {
       return
     }
 
-    // ===== DL MODE (FORMAT) =====
+    // ===== DL FORMAT =====
     if (s.mode === 'DL' && pendingLink.has(sender)) {
-      if (t !== '1' && t !== '2') {
+      if (!['1', '2'].includes(t)) {
         await sock.sendMessage(chatId, { text: TXT[lang].chooseFmt })
         return
       }
@@ -243,11 +246,11 @@ async function startBot() {
 
       p.on('close', async code => {
         activeDownloads.delete(sender)
+        s.mode = null
 
         if (code !== 0) {
           await sock.sendMessage(chatId, { text: TXT[lang].fail })
           await sock.sendMessage(chatId, { text: TXT[lang].menu() })
-          s.mode = null
           return
         }
 
@@ -265,11 +268,10 @@ async function startBot() {
         }
 
         await fs.remove(file)
-        s.mode = null
         await sock.sendMessage(chatId, { text: TXT[lang].menu() })
       })
     }
   })
 }
 
-startBot().catch(console.error)
+startBot()
