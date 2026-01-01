@@ -1,6 +1,6 @@
 /**
- * WhatsApp Bot – Groq AI (Auto Fallback Models)
- * Termux / VPS / Laptop
+ * WhatsApp Bot – Groq AI
+ * Auto Fallback Model + Rate Limit + Cooldown
  */
 
 require('dotenv').config()
@@ -20,12 +20,20 @@ const readline = require('readline')
 const PREFIX = '!'
 const BOT_NAME = 'WA-BOT'
 
-// 🔁 URUTAN MODEL (PRIORITAS)
+// 🔁 GROQ MODEL PRIORITY
 const GROQ_MODELS = [
-  'llama-3.1-8b-instant',     // cepat & hemat
-  'mixtral-8x7b-32768',       // fallback
-  'llama-3.1-70b-versatile'  // paling pintar
+  'llama-3.1-8b-instant',
+  'mixtral-8x7b-32768',
+  'llama-3.1-70b-versatile'
 ]
+
+// ⏱️ RATE LIMIT CONFIG
+const USER_COOLDOWN_MS = 3000          // 3 detik
+const MAX_REQUESTS_PER_MINUTE = 5
+
+// ================= STATE =================
+const userCooldown = new Map()         // userJid -> lastTimestamp
+const userRequests = new Map()         // userJid -> [timestamps]
 
 // ================= INPUT =================
 const rl = readline.createInterface({
@@ -33,6 +41,34 @@ const rl = readline.createInterface({
   output: process.stdout
 })
 const ask = q => new Promise(r => rl.question(q, r))
+
+// ================= RATE LIMIT =================
+function isRateLimited(user) {
+  const now = Date.now()
+
+  // Cooldown
+  if (userCooldown.has(user)) {
+    const last = userCooldown.get(user)
+    if (now - last < USER_COOLDOWN_MS) {
+      return { limited: true, reason: 'cooldown' }
+    }
+  }
+
+  // Per-minute limit
+  const windowStart = now - 60_000
+  const history = userRequests.get(user) || []
+  const recent = history.filter(ts => ts > windowStart)
+
+  if (recent.length >= MAX_REQUESTS_PER_MINUTE) {
+    return { limited: true, reason: 'rate' }
+  }
+
+  recent.push(now)
+  userRequests.set(user, recent)
+  userCooldown.set(user, now)
+
+  return { limited: false }
+}
 
 // ================= AI (GROQ + FALLBACK) =================
 async function aiReply(prompt) {
@@ -57,7 +93,7 @@ async function aiReply(prompt) {
         }
       )
 
-      console.log(`🤖 AI reply using model: ${model}`)
+      console.log(`🤖 AI reply using: ${model}`)
       return res.data.choices[0].message.content
     } catch (err) {
       console.error(
@@ -67,7 +103,7 @@ async function aiReply(prompt) {
     }
   }
 
-  return '⚠️ Semua model AI sedang bermasalah. Coba lagi nanti.'
+  return '⚠️ Semua model AI sedang bermasalah.'
 }
 
 // ================= BOT =================
@@ -98,7 +134,7 @@ async function startBot() {
 
     if (connection === 'open') {
       console.log(`✅ ${BOT_NAME} connected`)
-      console.log(`🤖 AI Models: ${GROQ_MODELS.join(', ')}`)
+      console.log(`🤖 Models: ${GROQ_MODELS.join(', ')}`)
     }
 
     if (connection === 'close') {
@@ -118,12 +154,23 @@ async function startBot() {
     if (!msg.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
+    const sender = msg.key.participant || chatId
     const text =
       msg.message.conversation ||
       msg.message.extendedTextMessage?.text ||
       ''
 
     if (!text) return
+
+    const limit = isRateLimited(sender)
+    if (limit.limited) {
+      const reply =
+        limit.reason === 'cooldown'
+          ? '⏳ Pelan-pelan bro 😄'
+          : '🚦 Kebanyakan request, tunggu 1 menit ya.'
+      await sock.sendMessage(chatId, { text: reply })
+      return
+    }
 
     await sock.sendPresenceUpdate('composing', chatId)
 
