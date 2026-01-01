@@ -1,6 +1,11 @@
 /**
  * WhatsApp Bot – Groq AI
- * Auto Fallback Model + Rate Limit + Cooldown
+ * STEP A COMPLETE:
+ * - Auto fallback model
+ * - Rate limit + cooldown
+ * - Message queue
+ * - Human-like typing delay
+ * - Global throttle
  */
 
 require('dotenv').config()
@@ -20,20 +25,28 @@ const readline = require('readline')
 const PREFIX = '!'
 const BOT_NAME = 'WA-BOT'
 
-// 🔁 GROQ MODEL PRIORITY
+// GROQ MODEL PRIORITY
 const GROQ_MODELS = [
   'llama-3.1-8b-instant',
   'mixtral-8x7b-32768',
   'llama-3.1-70b-versatile'
 ]
 
-// ⏱️ RATE LIMIT CONFIG
-const USER_COOLDOWN_MS = 3000          // 3 detik
+// RATE LIMIT
+const USER_COOLDOWN_MS = 3000
 const MAX_REQUESTS_PER_MINUTE = 5
 
+// HUMAN BEHAVIOR
+const TYPING_DELAY_MIN = 800
+const TYPING_DELAY_MAX = 1600
+const GLOBAL_THROTTLE_MS = 700
+
 // ================= STATE =================
-const userCooldown = new Map()         // userJid -> lastTimestamp
-const userRequests = new Map()         // userJid -> [timestamps]
+const userCooldown = new Map()
+const userRequests = new Map()
+const chatQueues = new Map()
+
+let lastGlobalSend = 0
 
 // ================= INPUT =================
 const rl = readline.createInterface({
@@ -42,22 +55,30 @@ const rl = readline.createInterface({
 })
 const ask = q => new Promise(r => rl.question(q, r))
 
+// ================= UTIL =================
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+function randomTypingDelay() {
+  return (
+    Math.floor(
+      Math.random() * (TYPING_DELAY_MAX - TYPING_DELAY_MIN + 1)
+    ) + TYPING_DELAY_MIN
+  )
+}
+
 // ================= RATE LIMIT =================
 function isRateLimited(user) {
   const now = Date.now()
 
-  // Cooldown
   if (userCooldown.has(user)) {
-    const last = userCooldown.get(user)
-    if (now - last < USER_COOLDOWN_MS) {
+    if (now - userCooldown.get(user) < USER_COOLDOWN_MS) {
       return { limited: true, reason: 'cooldown' }
     }
   }
 
-  // Per-minute limit
   const windowStart = now - 60_000
   const history = userRequests.get(user) || []
-  const recent = history.filter(ts => ts > windowStart)
+  const recent = history.filter(t => t > windowStart)
 
   if (recent.length >= MAX_REQUESTS_PER_MINUTE) {
     return { limited: true, reason: 'rate' }
@@ -93,17 +114,33 @@ async function aiReply(prompt) {
         }
       )
 
-      console.log(`🤖 AI reply using: ${model}`)
+      console.log(`🤖 AI model used: ${model}`)
       return res.data.choices[0].message.content
     } catch (err) {
       console.error(
-        `⚠️ Model ${model} failed:`,
+        `⚠️ ${model} failed:`,
         err.response?.data?.error?.code || err.message
       )
     }
   }
 
   return '⚠️ Semua model AI sedang bermasalah.'
+}
+
+// ================= QUEUE HANDLER =================
+async function enqueueMessage(chatId, task) {
+  const queue = chatQueues.get(chatId) || Promise.resolve()
+
+  const next = queue.then(async () => {
+    const now = Date.now()
+    const wait = Math.max(0, GLOBAL_THROTTLE_MS - (now - lastGlobalSend))
+    if (wait > 0) await sleep(wait)
+
+    await task()
+    lastGlobalSend = Date.now()
+  })
+
+  chatQueues.set(chatId, next.catch(() => {}))
 }
 
 // ================= BOT =================
@@ -120,7 +157,7 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds)
 
-  // 🔑 PAIRING CODE
+  // PAIRING
   if (!state.creds.registered) {
     const phone = await ask('Masukkan nomor (62xxx): ')
     const code = await sock.requestPairingCode(phone)
@@ -129,22 +166,13 @@ async function startBot() {
   }
 
   // CONNECTION
-  sock.ev.on('connection.update', update => {
-    const { connection, lastDisconnect } = update
-
-    if (connection === 'open') {
+  sock.ev.on('connection.update', u => {
+    if (u.connection === 'open') {
       console.log(`✅ ${BOT_NAME} connected`)
-      console.log(`🤖 Models: ${GROQ_MODELS.join(', ')}`)
     }
-
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode
-      if (code !== DisconnectReason.loggedOut) {
-        console.log('🔁 Reconnecting...')
-        startBot()
-      } else {
-        console.log('❌ Session logout, hapus folder session.')
-      }
+    if (u.connection === 'close') {
+      const code = u.lastDisconnect?.error?.output?.statusCode
+      if (code !== DisconnectReason.loggedOut) startBot()
     }
   })
 
@@ -164,71 +192,67 @@ async function startBot() {
 
     const limit = isRateLimited(sender)
     if (limit.limited) {
-      const reply =
+      const warn =
         limit.reason === 'cooldown'
-          ? '⏳ Pelan-pelan bro 😄'
-          : '🚦 Kebanyakan request, tunggu 1 menit ya.'
-      await sock.sendMessage(chatId, { text: reply })
-      return
-    }
-
-    await sock.sendPresenceUpdate('composing', chatId)
-
-    // AUTO REPLY
-    if (/^(halo|hai|hello|oi|oii+)$/i.test(text)) {
-      await sock.sendMessage(chatId, {
-        text: `Halo 👋 gue ${BOT_NAME}`
+          ? '⏳ Pelan-pelan ya 😄'
+          : '🚦 Kebanyakan request, tunggu sebentar.'
+      await enqueueMessage(chatId, async () => {
+        await sock.sendMessage(chatId, { text: warn })
       })
       return
     }
 
-    // COMMAND
-    if (text.startsWith(PREFIX)) {
-      const [cmd, ...args] = text.slice(1).split(' ')
-      const command = cmd.toLowerCase()
+    await enqueueMessage(chatId, async () => {
+      await sock.sendPresenceUpdate('composing', chatId)
+      await sleep(randomTypingDelay())
 
-      if (command === 'ping') {
-        await sock.sendMessage(chatId, { text: 'pong 🏓' })
+      if (/^(halo|hai|hello|oi|oii+)$/i.test(text)) {
+        await sock.sendMessage(chatId, { text: `Halo 👋 gue ${BOT_NAME}` })
         return
       }
 
-      if (command === 'menu') {
-        await sock.sendMessage(chatId, {
-          text: `
+      if (text.startsWith(PREFIX)) {
+        const [cmd, ...args] = text.slice(1).split(' ')
+        const c = cmd.toLowerCase()
+
+        if (c === 'ping') {
+          await sock.sendMessage(chatId, { text: 'pong 🏓' })
+          return
+        }
+
+        if (c === 'menu') {
+          await sock.sendMessage(chatId, {
+            text: `
 📜 *MENU*
 !ping
 !menu
 !ai <teks>
 `
-        })
-        return
-      }
-
-      if (command === 'ai') {
-        if (!args.length) {
-          await sock.sendMessage(chatId, {
-            text: 'Contoh: !ai jelasin nodejs'
           })
           return
         }
-        const reply = await aiReply(args.join(' '))
-        await sock.sendMessage(chatId, { text: reply })
+
+        if (c === 'ai') {
+          if (!args.length) {
+            await sock.sendMessage(chatId, {
+              text: 'Contoh: !ai jelasin nodejs'
+            })
+            return
+          }
+          const reply = await aiReply(args.join(' '))
+          await sock.sendMessage(chatId, { text: reply })
+          return
+        }
+
+        await sock.sendMessage(chatId, { text: 'Command tidak dikenal ❌' })
         return
       }
 
-      await sock.sendMessage(chatId, {
-        text: 'Command tidak dikenal ❌'
-      })
-      return
-    }
-
-    // DEFAULT AI CHAT
-    const reply = await aiReply(text)
-    await sock.sendMessage(chatId, { text: reply })
+      const reply = await aiReply(text)
+      await sock.sendMessage(chatId, { text: reply })
+    })
   })
 }
 
 // ================= RUN =================
-startBot().catch(err => {
-  console.error('❌ FATAL ERROR:', err)
-})
+startBot().catch(err => console.error('❌ FATAL:', err))
