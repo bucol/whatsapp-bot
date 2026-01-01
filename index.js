@@ -17,39 +17,69 @@ const BOT_NAME = 'WhatsappBotGro'
 const DOWNLOAD_DIR = './downloads'
 fs.ensureDirSync(DOWNLOAD_DIR)
 
+// ================= STATE =================
 const session = new Map()
 const pendingLink = new Map()
 const activeDownload = new Set()
 
-// ================= UTILS =================
-const getText = m =>
-  m.message?.conversation ||
-  m.message?.extendedTextMessage?.text ||
-  m.message?.buttonsResponseMessage?.selectedButtonId ||
-  m.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
-    ? JSON.parse(m.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson).id
-    : ''
+// ================= SAFE TEXT PARSER =================
+function getText(msg) {
+  try {
+    const m = msg.message
+    if (!m) return ''
 
+    if (m.conversation) return m.conversation
+    if (m.extendedTextMessage?.text) return m.extendedTextMessage.text
+
+    if (m.buttonsResponseMessage?.selectedButtonId)
+      return m.buttonsResponseMessage.selectedButtonId
+
+    const native =
+      m.interactiveResponseMessage?.nativeFlowResponseMessage
+    if (native?.paramsJson) {
+      const parsed = JSON.parse(native.paramsJson)
+      return parsed?.id || ''
+    }
+
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+// ================= UTILS =================
 const detectLang = t =>
   /(gue|lu|kok|udah|bang|woy)/i.test(t) ? 'id' : 'en'
 
-// ================= BUTTON =================
-const menuButtons = (lang) => ({
+// ================= BUTTON BUILDERS =================
+const menuButtons = lang => ({
   viewOnceMessage: {
     message: {
       interactiveMessage: {
         header: { title: `👋 ${BOT_NAME}` },
         body: {
-          text: lang === 'id'
-            ? 'Pilih menu di bawah'
-            : 'Choose a menu below'
+          text:
+            lang === 'id'
+              ? 'Pilih menu di bawah'
+              : 'Choose a menu below'
         },
         footer: { text: BOT_NAME },
         nativeFlowMessage: {
           buttons: [
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '🤖 AI Chat', id: 'AI' }) },
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '⬇️ Downloader', id: 'DL' }) },
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '🧰 Tools', id: 'TOOLS' }) }
+            {
+              name: 'quick_reply',
+              buttonParamsJson: JSON.stringify({
+                display_text: '🤖 AI Chat',
+                id: 'AI'
+              })
+            },
+            {
+              name: 'quick_reply',
+              buttonParamsJson: JSON.stringify({
+                display_text: '⬇️ Downloader',
+                id: 'DL'
+              })
+            }
           ]
         }
       }
@@ -64,7 +94,13 @@ const backButton = () => ({
         body: { text: '⬅️ Back to menu' },
         nativeFlowMessage: {
           buttons: [
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '📋 Menu', id: 'MENU' }) }
+            {
+              name: 'quick_reply',
+              buttonParamsJson: JSON.stringify({
+                display_text: '📋 Menu',
+                id: 'MENU'
+              })
+            }
           ]
         }
       }
@@ -80,7 +116,11 @@ async function aiReply(text) {
       model: 'llama-3.1-8b-instant',
       messages: [{ role: 'user', content: text }]
     },
-    { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` } }
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`
+      }
+    }
   )
   return r.data.choices[0].message.content
 }
@@ -103,13 +143,16 @@ async function start() {
       console.log(`✅ ${BOT_NAME} connected`)
     if (
       u.connection === 'close' &&
-      u.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
-    ) start()
+      u.lastDisconnect?.error?.output?.statusCode !==
+        DisconnectReason.loggedOut
+    ) {
+      start()
+    }
   })
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0]
-    if (!msg?.message || msg.key.fromMe) return
+    if (!msg || !msg.message || msg.key.fromMe) return
 
     const chatId = msg.key.remoteJid
     const isGroup = chatId.endsWith('@g.us')
@@ -117,13 +160,14 @@ async function start() {
     const text = getText(msg)
     const key = isGroup ? `${chatId}:${sender}` : sender
 
-    // GROUP: hanya respon kalau dipanggil
+    // GROUP ENTRY FILTER
     if (isGroup && !session.has(key)) {
       const mentioned =
-        msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || []
+        msg.message.extendedTextMessage?.contextInfo?.mentionedJid || []
       if (!mentioned.includes(sock.user.id)) return
     }
 
+    // INIT SESSION
     if (!session.has(key)) {
       const lang = detectLang(text)
       session.set(key, { lang, mode: null })
@@ -133,12 +177,14 @@ async function start() {
 
     const s = session.get(key)
 
+    // MENU
     if (text === 'MENU') {
       s.mode = null
       await sock.sendMessage(chatId, menuButtons(s.lang))
       return
     }
 
+    // AI MODE
     if (text === 'AI') {
       s.mode = 'AI'
       await sock.sendMessage(chatId, { text: '🤖 AI ready. Say anything.' })
@@ -153,9 +199,12 @@ async function start() {
       return
     }
 
+    // DL MODE
     if (text === 'DL') {
       s.mode = 'DL'
-      await sock.sendMessage(chatId, { text: '⬇️ Send video link (YT / IG / TikTok)' })
+      await sock.sendMessage(chatId, {
+        text: '⬇️ Send video link (YT / IG / TikTok)'
+      })
       await sock.sendMessage(chatId, backButton())
       return
     }
@@ -168,7 +217,9 @@ async function start() {
 
       spawn('yt-dlp', ['-f', 'mp4', text]).on('close', () => {
         activeDownload.delete(key)
-        sock.sendMessage(chatId, { text: '✅ Done (file saved on server)' })
+        sock.sendMessage(chatId, {
+          text: '✅ Done (saved on server)'
+        })
         sock.sendMessage(chatId, menuButtons(s.lang))
       })
     }
